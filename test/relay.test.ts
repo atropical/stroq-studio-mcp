@@ -83,7 +83,7 @@ describe('pairing', () => {
     await expect(t.open).rejects.toBeDefined();
   });
 
-  it('refuses a tab that does not know the token, takes nothing from it, and spends the token', async () => {
+  it('refuses a tab that does not know the token and takes nothing from it', async () => {
     let changed = 0;
     const r = await startRelay({ onToolsChanged: () => changed++ });
     const token = r.pairingToken;
@@ -94,28 +94,60 @@ describe('pairing', () => {
     expect(await t.closed).toBe(4003);
     expect(changed).toBe(0);
     expect(r.status().state).toBe('waiting');
-    expect(r.pairingToken).not.toBe(token);
+    expect(r.pairingToken).toBe(token);
   });
 
-  it('gives no offline oracle: a proof seen by an unfinished handshake is for a token already replaced', async () => {
+  it('keeps the token when a handshake is left unfinished (nothing local can keep breaking pairing)', async () => {
     const r = await startRelay();
     const token = r.pairingToken;
-    const spy = tab(r);
-    await spy.open;
-    const tn = nonce();
-    spy.send({ type: 'hello', protocol: PROTOCOL, mode: 'token', port: r.port, nonce: tn });
-    const c = (await spy.next('challenge')) as { nonce: string; proof: string };
-    // The relay's proof is of the current token…
-    expect(c.proof).toBe(hmac(tokenKey(token), proofText('relay', r.port, tn, c.nonce)));
-    expect(JSON.stringify(c)).not.toContain(tokenKey(token));
-    // …but walking away spends it: guessing it offline gains nothing.
-    spy.ws.close();
-    await spy.closed;
+    for (let i = 0; i < 3; i++) {
+      const spy = tab(r);
+      await spy.open;
+      spy.send({ type: 'hello', protocol: PROTOCOL, mode: 'token', port: r.port, nonce: nonce() });
+      const c = await spy.next('challenge');
+      expect(JSON.stringify(c)).not.toContain(tokenKey(token));
+      spy.ws.close();
+      await spy.closed;
+    }
     await Bun.sleep(30);
-    expect(r.pairingToken).not.toBe(token);
-    const late = tab(r);
-    expect((await late.pair(tokenKey(token))).relayProved).toBe(false);
-    await late.next('refused');
+    expect(r.pairingToken).toBe(token);
+    const t = tab(r);
+    expect((await t.pair(tokenKey(token))).relayProved).toBe(true);
+    await t.next('welcome');
+  });
+
+  it('replaces the token after five wrong proofs, at most once a minute', async () => {
+    const r = await startRelay();
+    const first = r.pairingToken;
+    const wrong = async (n: number) => {
+      for (let i = 0; i < n; i++) {
+        const t = tab(r);
+        await t.pair('WRONG');
+        await t.closed;
+      }
+    };
+    await wrong(4);
+    expect(r.pairingToken).toBe(first);
+    await wrong(1);
+    const second = r.pairingToken;
+    expect(second).not.toBe(first);
+    await wrong(5);
+    expect(r.pairingToken).toBe(second);
+  });
+
+  it('ignores hellos past 30 a minute', async () => {
+    const r = await startRelay();
+    for (let i = 0; i < 30; i++) {
+      const t = tab(r);
+      await t.open;
+      t.send({ type: 'hello', protocol: PROTOCOL, mode: 'token', port: r.port, nonce: nonce() });
+      await t.next('challenge');
+      t.ws.close();
+    }
+    const t = tab(r);
+    await t.open;
+    t.send({ type: 'hello', protocol: PROTOCOL, mode: 'token', port: r.port, nonce: nonce() });
+    expect(await t.closed).toBe(4005);
   });
 
   it('makes 130-bit tokens grouped for pasting', () => {

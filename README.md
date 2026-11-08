@@ -86,10 +86,11 @@ Studio's comments.
 - Accepts a WebSocket only from an allowed `Origin` (the Studio's addresses
   above, or the ones you pass with `--origin`), so other web pages cannot use
   it.
-- The pairing token is 26 base32 characters (about 130 bits). Any pairing
-  attempt that fails or is not finished within 30 seconds replaces it with a
-  new one (printed on stderr), so the relay's proof can never be used to guess
-  it offline.
+- The pairing token is 26 base32 characters (about 130 bits), far too many to
+  guess offline from the relay's proof. Five wrong proofs replace it with a
+  new one (printed on stderr), at most once a minute; a handshake left
+  unfinished (30 seconds) is simply dropped. Hellos past 30 a minute are
+  ignored, so nothing on the machine can keep breaking pairing.
 - Pairing is mutual and bound to the port: the tab and the relay each prove
   they know the token with an HMAC-SHA256 over two fresh nonces and the port
   the tab dialled, which the relay checks against the port it listens on. The

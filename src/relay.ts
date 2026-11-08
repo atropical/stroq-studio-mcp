@@ -7,9 +7,10 @@
  * allowed Origin only, after a mutual HMAC proof of the pairing token (or of
  * the resume key both derived when they paired) bound to this port; then
  * every frame is MACed with the session key and a sequence number (see
- * protocol.ts). The token never crosses the wire, and any handshake that
- * fails or is left unfinished replaces it, so a relay proof is never an
- * oracle for guessing it offline.
+ * protocol.ts). The token never crosses the wire and has ~130 bits, so a
+ * relay proof is no use for guessing it offline. Five wrong proofs replace it
+ * (at most once a minute); hellos past 30 a minute are ignored, so nothing on
+ * the machine can keep breaking pairing.
  */
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import type { IncomingMessage } from 'node:http';
@@ -20,10 +21,15 @@ export const hmac = (key: string, text: string) => createHmac('sha256', key).upd
 
 export const DEFAULT_PORT = 3021;
 export const DEFAULT_ORIGINS = ['https://studio.stroq.club', 'http://localhost:3020'];
-/** A handshake must finish within this time; one that does not replaces the token. */
+/** A handshake must finish within this time. */
 export const HANDSHAKE_MS = 30_000;
 /** Longest a tool call may take (wait_for_comments waits up to 10 min). */
 export const CALL_TIMEOUT_MS = 11 * 60_000;
+/** Wrong proofs before the token is replaced; replaced at most once per ROTATE_MS. */
+export const MAX_WRONG = 5;
+export const ROTATE_MS = 60_000;
+/** Hellos accepted per minute; the rest are closed unanswered. */
+export const MAX_HELLOS_PER_MIN = 30;
 
 const BASE32 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
 
@@ -73,6 +79,9 @@ export class Relay {
   private token = newToken();
   private resume: string | null = null;
   private tab: { ws: WebSocket; origin: string; session: string; seqOut: number } | null = null;
+  private wrong = 0;
+  private lastRotate = 0;
+  private hellos: number[] = [];
   private toolList: ToolInfo[] = [];
   private nextId = 1;
   private pending = new Map<number, Pending>();
@@ -177,6 +186,7 @@ export class Relay {
       if (!paired) {
         if (!attempt) {
           if (msg.type !== 'hello') return ws.close(4001, 'hello first');
+          if (!this.helloAllowed()) return ws.close(4005, 'too many hellos');
           if (msg.protocol !== PROTOCOL) return refuse(`This relay speaks protocol ${PROTOCOL}, the Studio ${msg.protocol}: update @atropical/stroq-studio-mcp, or reload the Studio`);
           if (this.tab) return refuse('Another Studio tab is connected. Disconnect it first.');
           if (msg.port !== this.port) return refuse(`This relay listens on port ${this.port}, not ${msg.port}.`);
@@ -190,10 +200,11 @@ export class Relay {
         if (msg.type !== 'prove') return ws.close(4001, 'prove next');
         const p = attempt;
         if (!sameSecret(msg.proof, hmac(p.key, proofText('tab', this.port, p.tabNonce, p.relayNonce))))
-          return refuse(p.mode === 'resume' ? 'The resume key no longer matches: connect with the pairing token.' : 'Wrong pairing token. Copy the one the relay printed.');
+          return refuse(p.mode === 'resume' ? 'The resume key no longer matches: connect with the pairing token.' : this.wrongProof());
         if (this.tab) return refuse('Another Studio tab is connected. Disconnect it first.');
         clearTimeout(timer);
         paired = true;
+        this.wrong = 0;
         if (p.mode === 'token') this.token = newToken(); // one-time: used up once it pairs
         // Bound to this proof: only the tab that proved it can derive them.
         this.resume = hmac(p.key, proofText('resume', this.port, p.tabNonce, p.relayNonce));
@@ -232,16 +243,7 @@ export class Relay {
     });
     ws.on('close', () => {
       clearTimeout(timer);
-      if (!paired) {
-        // A failed or unfinished handshake that saw a proof of the token: the token is spent.
-        if (attempt?.mode === 'token') {
-          this.token = newToken();
-          this.log('A pairing attempt failed or was not finished: the pairing token changed.');
-          this.announce();
-        }
-        return;
-      }
-      if (this.tab?.ws !== ws) return;
+      if (!paired || this.tab?.ws !== ws) return;
       this.tab = null;
       this.toolList = [];
       this.failAll('The Studio tab disconnected');
@@ -250,6 +252,27 @@ export class Relay {
       this.log('Studio tab disconnected (reloading the same tab reconnects by itself).');
       this.announce();
     });
+  }
+
+  /** Sliding window of hellos; false past MAX_HELLOS_PER_MIN. */
+  private helloAllowed(now = Date.now()): boolean {
+    this.hellos = this.hellos.filter((t) => now - t < 60_000);
+    if (this.hellos.length >= MAX_HELLOS_PER_MIN) return false;
+    this.hellos.push(now);
+    return true;
+  }
+
+  /** A wrong token proof: counted; MAX_WRONG of them replace the token, at most once per ROTATE_MS. */
+  private wrongProof(now = Date.now()): string {
+    this.wrong++;
+    if (this.wrong >= MAX_WRONG && now - this.lastRotate >= ROTATE_MS) {
+      this.wrong = 0;
+      this.lastRotate = now;
+      this.token = newToken();
+      this.log(`${MAX_WRONG} wrong tokens: the pairing token changed.`);
+      this.announce();
+    }
+    return 'Wrong pairing token. Copy the one the relay printed.';
   }
 
   private failAll(why: string) {
