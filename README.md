@@ -1,6 +1,7 @@
 # stroq-studio-mcp
 
-Connects an AI agent (Claude Code, Claude Desktop or any MCP client) to an open
+Connects your AI agent (any MCP client: Claude Code, Codex, Cursor, Claude
+Desktop and others) to an open
 [Strōq World Studio](https://studio.stroq.club) tab, so the agent can build
 cycling courses with the Studio's own tools: routes, road pieces, land,
 landscapes, scenery, screenshots and your comments.
@@ -21,9 +22,16 @@ MCP client  ⇄ stdio ⇄  stroq-studio-mcp  ⇄ ws://127.0.0.1:3021 ⇄  Studio
 claude mcp add stroq-studio -- npx -y @atropical/stroq-studio-mcp
 ```
 
-### Claude Desktop
+### Codex CLI
 
-Add it to `claude_desktop_config.json` (Settings → Developer → Edit Config):
+```sh
+codex mcp add stroq-studio -- npx -y @atropical/stroq-studio-mcp
+```
+
+### Claude Desktop, Cursor and other MCP clients
+
+Add it to the client's MCP config (Claude Desktop: `claude_desktop_config.json`,
+Settings → Developer → Edit Config; Cursor: `~/.cursor/mcp.json`):
 
 ```json
 {
@@ -36,15 +44,15 @@ Add it to `claude_desktop_config.json` (Settings → Developer → Edit Config):
 }
 ```
 
-Then restart Claude Desktop.
+Then restart the client.
 
 ### Connect the Studio
 
 1. Start your agent. The relay prints one pairing code, `port:TOKEN`, such as
-   `3021:ABCDE-FGHIJ-KLMNO-PQRST-UVW234`, on stderr (Claude Code: `/mcp` shows
-   the server log). Or ask the agent to "connect to the Studio": its
+   `3021:ABCDE-FGHIJ-KLMNO-PQRST-UVW234`, on stderr (most clients show the
+   server log). Or ask the agent to "connect to the Studio": its
    `studio_connection` tool returns it.
-2. In the Studio: **Help → Connect an agent**. Paste the code and switch
+2. In the Studio: **Tools → AI agent → Connect…**. Paste the code and switch
    **Connect** on. The light turns on when it is connected. (A token pasted on
    its own means port 3021.)
 3. Ask the agent for something, e.g. "build a 10 km alpine climb with a village
