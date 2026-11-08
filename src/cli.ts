@@ -39,7 +39,7 @@ server.oninitialized = () => {
 try {
   await relay.start();
 } catch (e) {
-  log(`Could not listen on 127.0.0.1:${opts.port}: ${(e as Error).message}. Is another relay running? Try --port.`);
+  log(`Could not listen on 127.0.0.1:${opts.port ?? relay.port}: ${(e as Error).message}.${opts.port ? ' Is another relay running on it? Pick another --port, or leave --port out to use any free port.' : ''}`);
   process.exit(1);
 }
 await server.connect(new StdioServerTransport());

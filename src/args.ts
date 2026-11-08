@@ -4,19 +4,21 @@
 
 import { DEFAULT_ORIGINS, DEFAULT_PORT } from './relay.js';
 
+
 export const HELP = `Usage: stroq-studio-mcp [--port <n>] [--origin <url>]...
 
 Connects an MCP client (Claude Code, Claude Desktop) to an open Strōq World Studio tab.
 
-  --port <n>      WebSocket port on 127.0.0.1 (default ${DEFAULT_PORT})
+  --port <n>      Fixed WebSocket port on 127.0.0.1 (fails if busy). Default:
+                  ${DEFAULT_PORT}, or any free port when that one is taken
   --origin <url>  A Studio origin allowed to connect; repeat for more. Replaces
                   the defaults (${DEFAULT_ORIGINS.join(', ')})
   --help          This text
 
-The pairing token is printed on stderr; enter it in the Studio under Help → Connect an agent.`;
+The pairing string (port:TOKEN) is printed on stderr; paste it in the Studio under Help → Connect an agent.`;
 
-export function parseArgs(argv: string[]): { port: number; origins: string[]; help: boolean } {
-  let port = DEFAULT_PORT;
+export function parseArgs(argv: string[]): { port?: number; origins: string[]; help: boolean } {
+  let port: number | undefined;
   const origins: string[] = [];
   let help = false;
   for (let i = 0; i < argv.length; i++) {
@@ -31,8 +33,9 @@ export function parseArgs(argv: string[]): { port: number; origins: string[]; he
     };
     if (flag === '--help' || flag === '-h') help = true;
     else if (flag === '--port') {
-      port = Number(value());
-      if (!Number.isInteger(port) || port < 1024 || port > 65535) throw new Error('--port must be a whole number from 1024 to 65535');
+      const n = Number(value());
+      port = n;
+      if (!Number.isInteger(n) || n < 1024 || n > 65535) throw new Error('--port must be a whole number from 1024 to 65535');
     } else if (flag === '--origin') {
       const o = value();
       let u: URL;

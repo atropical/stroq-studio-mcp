@@ -15,6 +15,7 @@
  *   tab → relay   hello     { type, protocol, mode, port, nonce }   mode 'token' | 'resume'; nonce: 32 random bytes, hex
  *   relay → tab   challenge { type, nonce, proof }    proof = HMAC-SHA256(key, "relay|" + port + "|" + tabNonce + "|" + relayNonce), hex
  *   tab → relay   prove     { type, proof }           after checking the relay's proof: HMAC(key, "tab|" + port + "|" + …)
+ *   relay → tab   wait      { type, ms }              the challenge comes late (many failed handshakes lately)
  *   relay → tab   refused   { type, reason }          then the relay closes the socket
  *
  * Then both hold session = HMAC(key, "session|…") and resume = HMAC(key,
@@ -62,6 +63,7 @@ export type RelayMessage =
   | { type: 'challenge'; nonce: string; proof: string }
   | { type: 'welcome'; protocol: number }
   | { type: 'sealed'; seq: number; body: string; mac: string }
+  | { type: 'wait'; ms: number }
   | { type: 'refused'; reason: string }
   | { type: 'call'; id: number; name: string; arguments: Record<string, unknown> }
   | { type: 'ping' }

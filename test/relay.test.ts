@@ -135,19 +135,65 @@ describe('pairing', () => {
     expect(r.pairingToken).toBe(second);
   });
 
-  it('ignores hellos past 30 a minute', async () => {
+  it('slows token hellos after a flood of unfinished handshakes, but never resume or a correct pairing', async () => {
     const r = await startRelay();
-    for (let i = 0; i < 30; i++) {
-      const t = tab(r);
-      await t.open;
-      t.send({ type: 'hello', protocol: PROTOCOL, mode: 'token', port: r.port, nonce: nonce() });
-      await t.next('challenge');
-      t.ws.close();
+    // A paired tab first, so there is a resume key.
+    const first = tab(r);
+    const { resume } = await first.pair(tokenKey(r.pairingToken));
+    await first.next('welcome');
+    first.ws.close();
+    await first.closed;
+    await Bun.sleep(30);
+    // 34 hellos left unfinished.
+    for (let i = 0; i < 34; i++) {
+      const spy = tab(r);
+      await spy.open;
+      spy.send({ type: 'hello', protocol: PROTOCOL, mode: 'token', port: r.port, nonce: nonce() });
+      await spy.next('challenge');
+      spy.ws.close();
+      await spy.closed;
     }
-    const t = tab(r);
-    await t.open;
-    t.send({ type: 'hello', protocol: PROTOCOL, mode: 'token', port: r.port, nonce: nonce() });
-    expect(await t.closed).toBe(4005);
+    await Bun.sleep(30);
+    expect(r.delay()).toBe(4 * 250);
+    // Resume: no wait.
+    const back = tab(r);
+    const t0 = Date.now();
+    expect((await back.pair(resume, 'resume')).relayProved).toBe(true);
+    await back.next('welcome');
+    expect(Date.now() - t0).toBeLessThan(500);
+    back.ws.close();
+    await back.closed;
+    await Bun.sleep(30);
+    // A correct token pairing waits, then works, and does not count.
+    const late = tab(r);
+    const before = r.delay();
+    const pairing = late.pair(tokenKey(r.pairingToken));
+    expect(await late.next('wait')).toEqual({ type: 'wait', ms: before });
+    expect((await pairing).relayProved).toBe(true);
+    await late.next('welcome');
+    expect(r.delay()).toBe(before);
+  });
+
+  it('caps the delay at 5 s', () => {
+    const r = new Relay();
+    (r as unknown as { strikes: number[] }).strikes = Array.from({ length: 500 }, () => Date.now());
+    expect(r.delay()).toBe(5000);
+  });
+
+  it('uses 3021, else any free port (and says so); a fixed busy port fails', async () => {
+    const lines: string[] = [];
+    const holder = new Relay({ port: 3021 });
+    const held = await holder.start().then(() => true, () => false); // 3021 may already be in use; either way it is taken now
+    relays.push(holder);
+    const r = new Relay({ log: (l) => lines.push(l) });
+    relays.push(r);
+    await r.start();
+    expect(r.port).not.toBe(3021);
+    expect(r.pairing).toBe(`${r.port}:${r.pairingToken}`);
+    expect(lines.join('\n')).toContain(`Port 3021 is taken, so the relay uses port ${r.port}`);
+    expect(lines.join('\n')).toContain(r.pairing);
+    expect(held || true).toBe(true);
+    await expect(new Relay({ port: r.port }).start()).rejects.toBeDefined();
   });
 
   it('makes 130-bit tokens grouped for pasting', () => {
@@ -288,7 +334,7 @@ describe('sealed frames', () => {
     const r = await startRelay();
     const res = await r.call('list_routes', {});
     expect(res.isError).toBe(true);
-    expect((res.content[0] as { text: string }).text).toContain(r.pairingToken);
+    expect((res.content[0] as { text: string }).text).toContain(r.pairing);
   });
 });
 
@@ -303,7 +349,7 @@ describe('frames and flags', () => {
   });
 
   it('parses --port and --origin', () => {
-    expect(parseArgs([])).toEqual({ port: 3021, origins: ['https://studio.stroq.club', 'http://localhost:3020'], help: false });
+    expect(parseArgs([])).toEqual({ port: undefined, origins: ['https://studio.stroq.club', 'http://localhost:3020'], help: false });
     expect(parseArgs(['--port', '4000', '--origin=http://localhost:3030/x'])).toEqual({ port: 4000, origins: ['http://localhost:3030'], help: false });
     expect(() => parseArgs(['--port', '80'])).toThrow();
     expect(() => parseArgs(['--origin', 'ftp://x'])).toThrow();

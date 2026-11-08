@@ -12,12 +12,12 @@ export const VERSION = '0.1.0';
 export const CONNECTION_TOOL = {
   name: 'studio_connection',
   description:
-    'Whether a Strōq World Studio tab is connected to this relay. When none is, it gives the port and the one-time pairing token to tell the person: in the Studio, Help → Connect an agent, enter both, switch Connect on. The Studio tools appear once the tab connects.',
+    'Whether a Strōq World Studio tab is connected to this relay. When none is, it gives the pairing string (port:TOKEN) to tell the person: in the Studio, Help → Connect an agent, paste it, switch Connect on. The Studio tools appear once the tab connects.',
   inputSchema: { type: 'object' as const, properties: {} },
 };
 
 export const INSTRUCTIONS =
-  'Tools of an open Strōq World Studio tab, relayed. If only studio_connection is listed, no tab is connected yet: call it and tell the person the port and pairing token to enter under Help → Connect an agent. While connected this agent owns the Studio comments: ack_comment straight away, get_comment for the picture and thread, do the work, then reply_comment saying what changed.';
+  'Tools of an open Strōq World Studio tab, relayed. If only studio_connection is listed, no tab is connected yet: call it and tell the person the pairing string (port:TOKEN) to paste under Help → Connect an agent. While connected this agent owns the Studio comments: ack_comment straight away, get_comment for the picture and thread, do the work, then reply_comment saying what changed.';
 
 export function createMcpServer(relay: Relay): Server {
   const server = new Server({ name: 'stroq-studio', version: VERSION }, { capabilities: { tools: { listChanged: true } }, instructions: INSTRUCTIONS });

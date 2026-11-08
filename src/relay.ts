@@ -9,8 +9,10 @@
  * every frame is MACed with the session key and a sequence number (see
  * protocol.ts). The token never crosses the wire and has ~130 bits, so a
  * relay proof is no use for guessing it offline. Five wrong proofs replace it
- * (at most once a minute); hellos past 30 a minute are ignored, so nothing on
- * the machine can keep breaking pairing.
+ * (at most once a minute). Token hellos after more than 30 failed or
+ * unfinished handshakes in a minute are answered late (growing, up to 5 s);
+ * successful pairings and resume hellos never count or wait, so nothing on
+ * the machine can block pairing.
  */
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import type { IncomingMessage } from 'node:http';
@@ -28,8 +30,14 @@ export const CALL_TIMEOUT_MS = 11 * 60_000;
 /** Wrong proofs before the token is replaced; replaced at most once per ROTATE_MS. */
 export const MAX_WRONG = 5;
 export const ROTATE_MS = 60_000;
-/** Hellos accepted per minute; the rest are closed unanswered. */
-export const MAX_HELLOS_PER_MIN = 30;
+/** Failed or unfinished handshakes a minute before token hellos are slowed down. */
+export const FREE_STRIKES_PER_MIN = 30;
+/** Delay per strike past the free ones, and its cap. */
+export const STRIKE_DELAY_MS = 250;
+export const MAX_DELAY_MS = 5_000;
+
+/** The one string the person pastes into the Studio: port and token. */
+export const pairingString = (port: number, token: string) => `${port}:${token}`;
 
 const BASE32 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
 
@@ -57,9 +65,10 @@ function sameSecret(a: string, b: string): boolean {
   return x.length === y.length && timingSafeEqual(x, y);
 }
 
-export type RelayStatus = { state: 'waiting'; token: string; port: number } | { state: 'connected'; origin: string; tools: number; port: number };
+export type RelayStatus = { state: 'waiting'; pairing: string; token: string; port: number } | { state: 'connected'; origin: string; tools: number; port: number };
 
 export interface RelayOptions {
+  /** A fixed port (fails when busy). Without it: DEFAULT_PORT, else any free port. */
   port?: number;
   origins?: string[];
   /** Where messages for the person go (stderr in the CLI; stdout belongs to MCP). */
@@ -73,7 +82,9 @@ interface Pending {
 }
 
 export class Relay {
-  readonly port: number;
+  private fixedPort: number | null;
+  /** The port it listens on (known once started). */
+  port: number;
   readonly origins: string[];
   private wss: WebSocketServer | null = null;
   private token = newToken();
@@ -81,7 +92,8 @@ export class Relay {
   private tab: { ws: WebSocket; origin: string; session: string; seqOut: number } | null = null;
   private wrong = 0;
   private lastRotate = 0;
-  private hellos: number[] = [];
+  /** When failed or unfinished token handshakes ended (last minute). */
+  private strikes: number[] = [];
   private toolList: ToolInfo[] = [];
   private nextId = 1;
   private pending = new Map<number, Pending>();
@@ -89,6 +101,7 @@ export class Relay {
   private onToolsChanged: () => void;
 
   constructor(opts: RelayOptions = {}) {
+    this.fixedPort = opts.port ?? null;
     this.port = opts.port ?? DEFAULT_PORT;
     this.origins = opts.origins ?? DEFAULT_ORIGINS;
     this.log = opts.log ?? (() => undefined);
@@ -99,24 +112,45 @@ export class Relay {
     return this.token;
   }
 
+  /** What the person pastes: "port:TOKEN". */
+  get pairing() {
+    return pairingString(this.port, this.token);
+  }
+
   get tools(): ToolInfo[] {
     return this.tab ? this.toolList : [];
   }
 
   status(): RelayStatus {
-    return this.tab ? { state: 'connected', origin: this.tab.origin, tools: this.toolList.length, port: this.port } : { state: 'waiting', token: this.token, port: this.port };
+    return this.tab ? { state: 'connected', origin: this.tab.origin, tools: this.toolList.length, port: this.port } : { state: 'waiting', pairing: this.pairing, token: this.token, port: this.port };
   }
 
-  /** Starts listening on 127.0.0.1. */
-  start(): Promise<void> {
+  /** Starts listening on 127.0.0.1: the fixed port, else DEFAULT_PORT, else any free port (said on the log). */
+  async start(): Promise<void> {
+    if (this.fixedPort !== null) return this.listen(this.fixedPort);
+    try {
+      await this.listen(DEFAULT_PORT);
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== 'EADDRINUSE') throw e;
+      await this.listen(0);
+      this.log(`Port ${DEFAULT_PORT} is taken, so the relay uses port ${this.port}.`);
+      this.announce();
+    }
+  }
+
+  private listen(port: number): Promise<void> {
     return new Promise((resolve, reject) => {
-      const wss = new WebSocketServer({ host: '127.0.0.1', port: this.port, maxPayload: MAX_FRAME, verifyClient: (info: { origin: string; req: IncomingMessage }) => this.allowed(info.origin, info.req) });
-      wss.once('error', reject);
+      const wss = new WebSocketServer({ host: '127.0.0.1', port, maxPayload: MAX_FRAME, verifyClient: (info: { origin: string; req: IncomingMessage }) => this.allowed(info.origin, info.req) });
+      wss.once('error', (e) => {
+        wss.close();
+        reject(e);
+      });
       wss.once('listening', () => {
-        wss.off('error', reject);
+        wss.removeAllListeners('error');
         wss.on('error', (e) => this.log(`WebSocket error: ${e.message}`));
         this.wss = wss;
-        this.announce();
+        this.port = (wss.address() as { port: number }).port;
+        if (port !== 0) this.announce();
         resolve();
       });
       wss.on('connection', (ws, req) => this.accept(ws, req.headers.origin ?? ''));
@@ -138,7 +172,7 @@ export class Relay {
   /** Runs a tool in the tab. Never throws: errors come back as isError content. */
   call(name: string, args: Record<string, unknown>): Promise<{ content: Content[]; isError: boolean }> {
     const tab = this.tab;
-    if (!tab) return Promise.resolve(err(`No Studio tab is connected. In the Studio: Help → Connect an agent, port ${this.port}, token ${this.token}.`));
+    if (!tab) return Promise.resolve(err(`No Studio tab is connected. In the Studio: Help → Connect an agent and paste ${this.pairing}.`));
     if (!this.toolList.some((t) => t.name === name)) return Promise.resolve(err(`The Studio has no tool "${name}"`));
     const id = this.nextId++;
     return new Promise((resolve) => {
@@ -163,7 +197,7 @@ export class Relay {
   }
 
   private announce() {
-    this.log(`Strōq Studio relay on ws://127.0.0.1:${this.port}. In the Studio: Help → Connect an agent, port ${this.port}, pairing token ${this.token}`);
+    this.log(`Strōq Studio relay on ws://127.0.0.1:${this.port}. In the Studio: Help → Connect an agent and paste ${this.pairing}`);
   }
 
   private accept(ws: WebSocket, origin: string) {
@@ -186,15 +220,20 @@ export class Relay {
       if (!paired) {
         if (!attempt) {
           if (msg.type !== 'hello') return ws.close(4001, 'hello first');
-          if (!this.helloAllowed()) return ws.close(4005, 'too many hellos');
           if (msg.protocol !== PROTOCOL) return refuse(`This relay speaks protocol ${PROTOCOL}, the Studio ${msg.protocol}: update @atropical/stroq-studio-mcp, or reload the Studio`);
           if (this.tab) return refuse('Another Studio tab is connected. Disconnect it first.');
           if (msg.port !== this.port) return refuse(`This relay listens on port ${this.port}, not ${msg.port}.`);
           const key = msg.mode === 'resume' ? this.resume : tokenKey(this.token);
           if (!key) return refuse('Nothing to resume: connect with the pairing token.');
           const relayNonce = randomBytes(32).toString('hex');
-          attempt = { tabNonce: msg.nonce, relayNonce, key, mode: msg.mode };
-          this.sendPlain(ws, { type: 'challenge', nonce: relayNonce, proof: hmac(key, proofText('relay', this.port, msg.nonce, relayNonce)) });
+          const a = { tabNonce: msg.nonce, relayNonce, key, mode: msg.mode };
+          attempt = a;
+          const challenge = () => this.sendPlain(ws, { type: 'challenge', nonce: relayNonce, proof: hmac(key, proofText('relay', this.port, a.tabNonce, relayNonce)) });
+          // Resume hellos (a 256-bit key) never wait; token hellos wait while failed handshakes pile up.
+          const wait = msg.mode === 'token' ? this.delay() : 0;
+          if (!wait) return challenge();
+          this.sendPlain(ws, { type: 'wait', ms: wait });
+          setTimeout(challenge, wait);
           return;
         }
         if (msg.type !== 'prove') return ws.close(4001, 'prove next');
@@ -243,6 +282,8 @@ export class Relay {
     });
     ws.on('close', () => {
       clearTimeout(timer);
+      // A token handshake that failed or was never finished counts; a successful one never does.
+      if (!paired && attempt?.mode === 'token') this.strikes.push(Date.now());
       if (!paired || this.tab?.ws !== ws) return;
       this.tab = null;
       this.toolList = [];
@@ -254,12 +295,11 @@ export class Relay {
     });
   }
 
-  /** Sliding window of hellos; false past MAX_HELLOS_PER_MIN. */
-  private helloAllowed(now = Date.now()): boolean {
-    this.hellos = this.hellos.filter((t) => now - t < 60_000);
-    if (this.hellos.length >= MAX_HELLOS_PER_MIN) return false;
-    this.hellos.push(now);
-    return true;
+  /** How long a token hello waits: 0 up to FREE_STRIKES_PER_MIN strikes in the last minute, then growing to MAX_DELAY_MS. */
+  delay(now = Date.now()): number {
+    this.strikes = this.strikes.filter((t) => now - t < 60_000);
+    const over = this.strikes.length - FREE_STRIKES_PER_MIN;
+    return over <= 0 ? 0 : Math.min(MAX_DELAY_MS, over * STRIKE_DELAY_MS);
   }
 
   /** A wrong token proof: counted; MAX_WRONG of them replace the token, at most once per ROTATE_MS. */

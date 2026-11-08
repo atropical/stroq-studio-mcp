@@ -33,7 +33,8 @@ it('lists studio_connection, then the tab’s tools, and relays a call', async (
 
   const status = JSON.parse((((await client.callTool({ name: 'studio_connection', arguments: {} })).content as { text: string }[])[0]!).text);
   expect(status.state).toBe('waiting');
-  expect(stderr).toContain(status.token);
+  expect(stderr).toContain(status.pairing);
+  expect(status.pairing).toBe(`${port}:${status.token}`);
 
   const nonce = randomBytes(32).toString('hex');
   ws = new WebSocket(`ws://127.0.0.1:${port}`, { origin: 'https://studio.stroq.club' });
