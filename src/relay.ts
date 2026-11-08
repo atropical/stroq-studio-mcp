@@ -5,35 +5,45 @@
 /**
  * The WebSocket side: one Studio tab at a time, on 127.0.0.1 only, from an
  * allowed Origin only, after a mutual HMAC proof of the pairing token (or of
- * the resume key both derived when they paired; see protocol.ts). The token
- * never crosses the wire.
+ * the resume key both derived when they paired) bound to this port; then
+ * every frame is MACed with the session key and a sequence number (see
+ * protocol.ts). The token never crosses the wire, and any handshake that
+ * fails or is left unfinished replaces it, so a relay proof is never an
+ * oracle for guessing it offline.
  */
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import type { IncomingMessage } from 'node:http';
 import { type WebSocket, WebSocketServer } from 'ws';
-import { type Content, MAX_FRAME, PROTOCOL, parseTabMessage, proofText, type RelayMessage, type ToolInfo, tokenKey } from './protocol.js';
+import { type Content, MAX_FRAME, macText, PROTOCOL, parseTabMessage, proofText, type RelayMessage, type ToolInfo, tokenKey } from './protocol.js';
 
 export const hmac = (key: string, text: string) => createHmac('sha256', key).update(text).digest('hex');
 
 export const DEFAULT_PORT = 3021;
 export const DEFAULT_ORIGINS = ['https://studio.stroq.club', 'http://localhost:3020'];
-/** Wrong tokens before the pairing token is replaced by a new one. */
-const MAX_WRONG = 5;
-/** The tab must say hello within this time. */
-const HELLO_MS = 10_000;
+/** A handshake must finish within this time; one that does not replaces the token. */
+export const HANDSHAKE_MS = 30_000;
 /** Longest a tool call may take (wait_for_comments waits up to 10 min). */
 export const CALL_TIMEOUT_MS = 11 * 60_000;
 
-const ALPHABET = 'ABCDEFGHJKMNPQRSTVWXYZ23456789';
+const BASE32 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
 
-/** An 8-character token, e.g. K7PQ-M3XA (no 0/O, 1/I/L, U). */
+/** A 26-character base32 token (130 random bits), grouped for pasting: XXXXX-XXXXX-XXXXX-XXXXX-XXXXXX. */
 export function newToken(): string {
-  const b = randomBytes(8);
+  const bytes = randomBytes(17);
+  let bits = 0;
+  let acc = 0;
   let s = '';
-  for (let i = 0; i < 8; i++) s += ALPHABET[b[i]! % ALPHABET.length];
-  return `${s.slice(0, 4)}-${s.slice(4)}`;
+  for (const b of bytes) {
+    acc = (acc << 8) | b;
+    bits += 8;
+    while (bits >= 5 && s.length < 26) {
+      s += BASE32[(acc >>> (bits - 5)) & 31];
+      bits -= 5;
+    }
+    acc &= (1 << bits) - 1;
+  }
+  return s.match(/.{1,5}/g)!.join('-').replace(/-(\w)$/, '$1');
 }
-
 
 function sameSecret(a: string, b: string): boolean {
   const x = Buffer.from(a);
@@ -62,8 +72,7 @@ export class Relay {
   private wss: WebSocketServer | null = null;
   private token = newToken();
   private resume: string | null = null;
-  private wrong = 0;
-  private tab: { ws: WebSocket; origin: string } | null = null;
+  private tab: { ws: WebSocket; origin: string; session: string; seqOut: number } | null = null;
   private toolList: ToolInfo[] = [];
   private nextId = 1;
   private pending = new Map<number, Pending>();
@@ -152,64 +161,86 @@ export class Relay {
     let paired = false;
     /** After hello: the nonces and the key this attempt uses. */
     let attempt: { tabNonce: string; relayNonce: string; key: string; mode: 'token' | 'resume' } | null = null;
-    const helloTimer = setTimeout(() => {
+    let session = '';
+    let seqIn = 0;
+    const timer = setTimeout(() => {
       if (!paired) ws.close(4000, 'not paired in time');
-    }, HELLO_MS);
+    }, HANDSHAKE_MS);
     const refuse = (why: string) => {
-      this.send(ws, { type: 'refused', reason: why });
+      this.sendPlain(ws, { type: 'refused', reason: why });
       ws.close(4003, 'refused');
     };
     ws.on('message', (data, isBinary) => {
       if (isBinary) return ws.close(4002, 'text frames only');
       const msg = parseTabMessage(data.toString());
-      if (!msg) return;
+      if (!msg) return ws.close(4001, 'bad frame');
       if (!paired) {
         if (!attempt) {
           if (msg.type !== 'hello') return ws.close(4001, 'hello first');
           if (msg.protocol !== PROTOCOL) return refuse(`This relay speaks protocol ${PROTOCOL}, the Studio ${msg.protocol}: update @atropical/stroq-studio-mcp, or reload the Studio`);
           if (this.tab) return refuse('Another Studio tab is connected. Disconnect it first.');
+          if (msg.port !== this.port) return refuse(`This relay listens on port ${this.port}, not ${msg.port}.`);
           const key = msg.mode === 'resume' ? this.resume : tokenKey(this.token);
           if (!key) return refuse('Nothing to resume: connect with the pairing token.');
           const relayNonce = randomBytes(32).toString('hex');
           attempt = { tabNonce: msg.nonce, relayNonce, key, mode: msg.mode };
-          this.send(ws, { type: 'challenge', nonce: relayNonce, proof: hmac(key, proofText('relay', msg.nonce, relayNonce)) });
+          this.sendPlain(ws, { type: 'challenge', nonce: relayNonce, proof: hmac(key, proofText('relay', this.port, msg.nonce, relayNonce)) });
           return;
         }
         if (msg.type !== 'prove') return ws.close(4001, 'prove next');
-        clearTimeout(helloTimer);
         const p = attempt;
-        if (!sameSecret(msg.proof, hmac(p.key, proofText('tab', p.tabNonce, p.relayNonce)))) return refuse(this.wrongProof(p.mode));
+        if (!sameSecret(msg.proof, hmac(p.key, proofText('tab', this.port, p.tabNonce, p.relayNonce))))
+          return refuse(p.mode === 'resume' ? 'The resume key no longer matches: connect with the pairing token.' : 'Wrong pairing token. Copy the one the relay printed.');
         if (this.tab) return refuse('Another Studio tab is connected. Disconnect it first.');
+        clearTimeout(timer);
         paired = true;
-        this.wrong = 0;
         if (p.mode === 'token') this.token = newToken(); // one-time: used up once it pairs
-        // Bound to this proof: only the tab that proved it can derive it.
-        this.resume = hmac(p.key, proofText('resume', p.tabNonce, p.relayNonce));
-        this.tab = { ws, origin };
+        // Bound to this proof: only the tab that proved it can derive them.
+        this.resume = hmac(p.key, proofText('resume', this.port, p.tabNonce, p.relayNonce));
+        session = hmac(p.key, proofText('session', this.port, p.tabNonce, p.relayNonce));
+        this.tab = { ws, origin, session, seqOut: 0 };
         this.send(ws, { type: 'welcome', protocol: PROTOCOL });
         this.log(`Studio tab connected (${origin})`);
         return;
       }
-      switch (msg.type) {
+      // Paired: only sealed frames, in order, with a good MAC.
+      if (msg.type !== 'sealed' || msg.seq !== seqIn || !sameSecret(msg.mac, hmac(session, macText('tab', msg.seq, msg.body)))) return ws.close(4004, 'bad or replayed frame');
+      seqIn++;
+      const inner = parseTabMessage(msg.body);
+      if (!inner) return ws.close(4001, 'bad frame');
+      switch (inner.type) {
         case 'tools':
-          this.toolList = msg.tools;
+          this.toolList = inner.tools;
           this.onToolsChanged();
           break;
         case 'result': {
-          const r = this.pending.get(msg.id);
+          const r = this.pending.get(inner.id);
           if (!r) break;
           clearTimeout(r.timer);
-          this.pending.delete(msg.id);
-          r.resolve({ content: msg.content, isError: !!msg.isError });
+          this.pending.delete(inner.id);
+          r.resolve({ content: inner.content, isError: !!inner.isError });
           break;
         }
         case 'ping':
           this.send(ws, { type: 'pong' });
           break;
+        case 'pong':
+          break;
+        default:
+          return ws.close(4001, 'bad frame');
       }
     });
     ws.on('close', () => {
-      clearTimeout(helloTimer);
+      clearTimeout(timer);
+      if (!paired) {
+        // A failed or unfinished handshake that saw a proof of the token: the token is spent.
+        if (attempt?.mode === 'token') {
+          this.token = newToken();
+          this.log('A pairing attempt failed or was not finished: the pairing token changed.');
+          this.announce();
+        }
+        return;
+      }
       if (this.tab?.ws !== ws) return;
       this.tab = null;
       this.toolList = [];
@@ -221,19 +252,6 @@ export class Relay {
     });
   }
 
-  /** A tab's proof did not match: counted; too many replace the token. */
-  private wrongProof(mode: 'token' | 'resume'): string {
-    if (mode === 'resume') return 'The resume key no longer matches: connect with the pairing token.';
-    this.wrong++;
-    if (this.wrong >= MAX_WRONG) {
-      this.wrong = 0;
-      this.token = newToken();
-      this.log('Too many wrong tokens: the pairing token changed.');
-      this.announce();
-    }
-    return 'Wrong pairing token. Copy the one the relay printed.';
-  }
-
   private failAll(why: string) {
     for (const [id, p] of this.pending) {
       clearTimeout(p.timer);
@@ -242,8 +260,18 @@ export class Relay {
     }
   }
 
-  private send(ws: WebSocket, m: RelayMessage) {
+  /** Before pairing: challenge and refused only. */
+  private sendPlain(ws: WebSocket, m: RelayMessage) {
     if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(m));
+  }
+
+  /** To the paired tab: sealed with the session key and the next sequence number. */
+  private send(ws: WebSocket, m: RelayMessage) {
+    const tab = this.tab;
+    if (!tab || tab.ws !== ws || ws.readyState !== ws.OPEN) return;
+    const body = JSON.stringify(m);
+    const seq = tab.seqOut++;
+    ws.send(JSON.stringify({ type: 'sealed', seq, body, mac: hmac(tab.session, macText('relay', seq, body)) }));
   }
 }
 

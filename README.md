@@ -40,7 +40,7 @@ Then restart Claude Desktop.
 
 ### Connect the Studio
 
-1. Start your agent. The relay prints a pairing token such as `K7PQ-M3XA` on
+1. Start your agent. The relay prints a pairing token such as `ABCDE-FGHIJ-KLMNO-PQRST-UVW234` on
    stderr (Claude Code: `/mcp` shows the server log). Or ask the agent to
    "connect to the Studio": its `studio_connection` tool returns the port and
    token.
@@ -49,7 +49,7 @@ Then restart Claude Desktop.
 3. Ask the agent for something, e.g. "build a 10 km alpine climb with a village
    at the top".
 
-The token works once. Reloading the same tab reconnects by itself; another tab,
+The token is good for one try. Reloading the same tab reconnects by itself; another tab,
 or a new relay, needs a new token (the relay prints one each time a tab
 disconnects).
 
@@ -86,26 +86,46 @@ Studio's comments.
 - Accepts a WebSocket only from an allowed `Origin` (the Studio's addresses
   above, or the ones you pass with `--origin`), so other web pages cannot use
   it.
-- Pairing is mutual: the tab and the relay each prove they know the one-time
-  pairing token with an HMAC-SHA256 over two fresh nonces, so the token never
-  crosses the wire and the tab trusts no other process on the port. Five wrong
-  proofs replace the token with a new one.
-- The resume key for reloads is derived from that proof on both sides and is
-  never sent either.
+- The pairing token is 26 base32 characters (about 130 bits). Any pairing
+  attempt that fails or is not finished within 30 seconds replaces it with a
+  new one (printed on stderr), so the relay's proof can never be used to guess
+  it offline.
+- Pairing is mutual and bound to the port: the tab and the relay each prove
+  they know the token with an HMAC-SHA256 over two fresh nonces and the port
+  the tab dialled, which the relay checks against the port it listens on. The
+  token never crosses the wire, the tab trusts no other process on the port,
+  and a relay in the middle on another port cannot pass the proofs on.
+- After pairing every frame, both ways, carries an HMAC with the session key
+  derived from the proof and a sequence number per direction; a changed,
+  replayed or out-of-order frame closes the connection.
+- The resume key for reloads is derived from the proof on both sides and is
+  never sent.
 - One tab at a time.
 - It stores nothing and reads no files: every tool runs inside the Studio tab,
   on the content in that browser.
 
 ## Protocol
 
-JSON text frames over one WebSocket (see `src/protocol.ts`). The key is the token (upper case, letters and digits) or the resume key, HMAC(key, "resume|" + tn + rn) from the last pairing; nonces are 32 random bytes in hex, proofs hex HMAC-SHA256.
+JSON text frames over one WebSocket (see `src/protocol.ts`). The key is the
+token (upper case, letters and digits) or the resume key from the last
+pairing; `port` is the port the tab dialled; nonces are 32 random bytes in hex;
+proofs and MACs are hex HMAC-SHA256.
 
 | Direction | Frame |
 | --- | --- |
-| tab → relay | `{ "type": "hello", "protocol": 2, "mode": "token" \| "resume", "nonce": tn }` |
-| relay → tab | `{ "type": "challenge", "nonce": rn, "proof": HMAC(key, "relay\|" + tn + rn) }` |
-| tab → relay | `{ "type": "prove", "proof": HMAC(key, "tab\|" + tn + rn) }` (only after checking the relay's proof) |
-| relay → tab | `{ "type": "welcome", "protocol": 2 }` or `{ "type": "refused", "reason": "…" }` |
+| tab → relay | `{ "type": "hello", "protocol": 3, "mode": "token" or "resume", "port": 3021, "nonce": tn }` |
+| relay → tab | `{ "type": "challenge", "nonce": rn, "proof": HMAC(key, "relay\|port\|tn\|rn") }` or `{ "type": "refused", "reason": "…" }` |
+| tab → relay | `{ "type": "prove", "proof": HMAC(key, "tab\|port\|tn\|rn") }` (only after checking the relay's proof) |
+
+Both then hold `session = HMAC(key, "session|port|tn|rn")` and
+`resume = HMAC(key, "resume|port|tn|rn")`. Every later frame is
+`{ "type": "sealed", "seq": n, "body": "<frame JSON>", "mac": HMAC(session, dir + "|" + n + "|" + body) }`,
+`dir` being `relay` or `tab` and `seq` counting from 0 in each direction.
+Sealed bodies:
+
+| Direction | Body |
+| --- | --- |
+| relay → tab | `{ "type": "welcome", "protocol": 3 }` (the first) |
 | tab → relay | `{ "type": "tools", "tools": [{ "name", "description", "inputSchema" }] }` |
 | relay → tab | `{ "type": "call", "id": 1, "name": "list_routes", "arguments": {} }` |
 | tab → relay | `{ "type": "result", "id": 1, "content": [MCP text/image blocks], "isError": false }` |

@@ -5,7 +5,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { ToolListChangedNotificationSchema } from '@modelcontextprotocol/sdk/types.js';
 import WebSocket from 'ws';
-import { PROTOCOL, proofText, tokenKey } from '../src/protocol.js';
+import { macText, PROTOCOL, proofText, tokenKey } from '../src/protocol.js';
 import { hmac } from '../src/relay.js';
 import { randomBytes } from 'node:crypto';
 
@@ -38,13 +38,25 @@ it('lists studio_connection, then the tab’s tools, and relays a call', async (
   const nonce = randomBytes(32).toString('hex');
   ws = new WebSocket(`ws://127.0.0.1:${port}`, { origin: 'https://studio.stroq.club' });
   await new Promise((r) => ws!.once('open', r));
+  const key = tokenKey(status.token);
+  let session = '';
+  let seq = 0;
+  const seal = (m: unknown) => {
+    const body = JSON.stringify(m);
+    const s = seq++;
+    ws!.send(JSON.stringify({ type: 'sealed', seq: s, body, mac: hmac(session, macText('tab', s, body)) }));
+  };
   ws.on('message', (d) => {
-    const m = JSON.parse(d.toString());
-    if (m.type === 'challenge') ws!.send(JSON.stringify({ type: 'prove', proof: hmac(tokenKey(status.token), proofText('tab', nonce, m.nonce)) }));
-    if (m.type === 'welcome') ws!.send(JSON.stringify({ type: 'tools', tools: [{ name: 'list_routes', description: 'List routes', inputSchema: { type: 'object', properties: {} } }] }));
-    if (m.type === 'call') ws!.send(JSON.stringify({ type: 'result', id: m.id, content: [{ type: 'text', text: `ran ${m.name}` }] }));
+    let m = JSON.parse(d.toString());
+    if (m.type === 'challenge') {
+      session = hmac(key, proofText('session', port, nonce, m.nonce));
+      return ws!.send(JSON.stringify({ type: 'prove', proof: hmac(key, proofText('tab', port, nonce, m.nonce)) }));
+    }
+    if (m.type === 'sealed') m = JSON.parse(m.body);
+    if (m.type === 'welcome') seal({ type: 'tools', tools: [{ name: 'list_routes', description: 'List routes', inputSchema: { type: 'object', properties: {} } }] });
+    if (m.type === 'call') seal({ type: 'result', id: m.id, content: [{ type: 'text', text: `ran ${m.name}` }] });
   });
-  ws.send(JSON.stringify({ type: 'hello', protocol: PROTOCOL, mode: 'token', nonce }));
+  ws.send(JSON.stringify({ type: 'hello', protocol: PROTOCOL, mode: 'token', port, nonce }));
 
   for (let i = 0; i < 100 && !changed; i++) await Bun.sleep(20);
   expect(changed).toBeGreaterThan(0);
