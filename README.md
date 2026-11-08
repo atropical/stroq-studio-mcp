@@ -86,20 +86,26 @@ Studio's comments.
 - Accepts a WebSocket only from an allowed `Origin` (the Studio's addresses
   above, or the ones you pass with `--origin`), so other web pages cannot use
   it.
-- A tab must show the one-time pairing token first. Five wrong tokens replace
-  it with a new one.
+- Pairing is mutual: the tab and the relay each prove they know the one-time
+  pairing token with an HMAC-SHA256 over two fresh nonces, so the token never
+  crosses the wire and the tab trusts no other process on the port. Five wrong
+  proofs replace the token with a new one.
+- The resume key for reloads is derived from that proof on both sides and is
+  never sent either.
 - One tab at a time.
 - It stores nothing and reads no files: every tool runs inside the Studio tab,
   on the content in that browser.
 
 ## Protocol
 
-JSON text frames over one WebSocket (see `src/protocol.ts`):
+JSON text frames over one WebSocket (see `src/protocol.ts`). The key is the token (upper case, letters and digits) or the resume key, HMAC(key, "resume|" + tn + rn) from the last pairing; nonces are 32 random bytes in hex, proofs hex HMAC-SHA256.
 
 | Direction | Frame |
 | --- | --- |
-| tab → relay | `{ "type": "hello", "protocol": 1, "token": "K7PQ-M3XA" }` (or the resume key) |
-| relay → tab | `{ "type": "welcome", "protocol": 1, "resume": "…" }` or `{ "type": "refused", "reason": "…" }` |
+| tab → relay | `{ "type": "hello", "protocol": 2, "mode": "token" \| "resume", "nonce": tn }` |
+| relay → tab | `{ "type": "challenge", "nonce": rn, "proof": HMAC(key, "relay\|" + tn + rn) }` |
+| tab → relay | `{ "type": "prove", "proof": HMAC(key, "tab\|" + tn + rn) }` (only after checking the relay's proof) |
+| relay → tab | `{ "type": "welcome", "protocol": 2 }` or `{ "type": "refused", "reason": "…" }` |
 | tab → relay | `{ "type": "tools", "tools": [{ "name", "description", "inputSchema" }] }` |
 | relay → tab | `{ "type": "call", "id": 1, "name": "list_routes", "arguments": {} }` |
 | tab → relay | `{ "type": "result", "id": 1, "content": [MCP text/image blocks], "isError": false }` |

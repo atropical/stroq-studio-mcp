@@ -4,13 +4,16 @@
 
 /**
  * The WebSocket side: one Studio tab at a time, on 127.0.0.1 only, from an
- * allowed Origin only, after it shows the pairing token (or the resume key
- * it got when it paired, so a reload reconnects without a new token).
+ * allowed Origin only, after a mutual HMAC proof of the pairing token (or of
+ * the resume key both derived when they paired; see protocol.ts). The token
+ * never crosses the wire.
  */
-import { randomBytes, timingSafeEqual } from 'node:crypto';
+import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import type { IncomingMessage } from 'node:http';
 import { type WebSocket, WebSocketServer } from 'ws';
-import { type Content, MAX_FRAME, PROTOCOL, parseTabMessage, type RelayMessage, type ToolInfo } from './protocol.js';
+import { type Content, MAX_FRAME, PROTOCOL, parseTabMessage, proofText, type RelayMessage, type ToolInfo, tokenKey } from './protocol.js';
+
+export const hmac = (key: string, text: string) => createHmac('sha256', key).update(text).digest('hex');
 
 export const DEFAULT_PORT = 3021;
 export const DEFAULT_ORIGINS = ['https://studio.stroq.club', 'http://localhost:3020'];
@@ -31,7 +34,6 @@ export function newToken(): string {
   return `${s.slice(0, 4)}-${s.slice(4)}`;
 }
 
-const normalise = (t: string) => t.trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
 
 function sameSecret(a: string, b: string): boolean {
   const x = Buffer.from(a);
@@ -148,25 +150,43 @@ export class Relay {
 
   private accept(ws: WebSocket, origin: string) {
     let paired = false;
+    /** After hello: the nonces and the key this attempt uses. */
+    let attempt: { tabNonce: string; relayNonce: string; key: string; mode: 'token' | 'resume' } | null = null;
     const helloTimer = setTimeout(() => {
-      if (!paired) ws.close(4000, 'no hello');
+      if (!paired) ws.close(4000, 'not paired in time');
     }, HELLO_MS);
+    const refuse = (why: string) => {
+      this.send(ws, { type: 'refused', reason: why });
+      ws.close(4003, 'refused');
+    };
     ws.on('message', (data, isBinary) => {
       if (isBinary) return ws.close(4002, 'text frames only');
       const msg = parseTabMessage(data.toString());
       if (!msg) return;
       if (!paired) {
-        if (msg.type !== 'hello') return ws.close(4001, 'hello first');
-        clearTimeout(helloTimer);
-        const why = this.pair(msg.protocol, msg.token);
-        if (why) {
-          this.send(ws, { type: 'refused', reason: why });
-          return ws.close(4003, 'refused');
+        if (!attempt) {
+          if (msg.type !== 'hello') return ws.close(4001, 'hello first');
+          if (msg.protocol !== PROTOCOL) return refuse(`This relay speaks protocol ${PROTOCOL}, the Studio ${msg.protocol}: update @atropical/stroq-studio-mcp, or reload the Studio`);
+          if (this.tab) return refuse('Another Studio tab is connected. Disconnect it first.');
+          const key = msg.mode === 'resume' ? this.resume : tokenKey(this.token);
+          if (!key) return refuse('Nothing to resume: connect with the pairing token.');
+          const relayNonce = randomBytes(32).toString('hex');
+          attempt = { tabNonce: msg.nonce, relayNonce, key, mode: msg.mode };
+          this.send(ws, { type: 'challenge', nonce: relayNonce, proof: hmac(key, proofText('relay', msg.nonce, relayNonce)) });
+          return;
         }
+        if (msg.type !== 'prove') return ws.close(4001, 'prove next');
+        clearTimeout(helloTimer);
+        const p = attempt;
+        if (!sameSecret(msg.proof, hmac(p.key, proofText('tab', p.tabNonce, p.relayNonce)))) return refuse(this.wrongProof(p.mode));
+        if (this.tab) return refuse('Another Studio tab is connected. Disconnect it first.');
         paired = true;
-        this.resume = randomBytes(24).toString('hex');
+        this.wrong = 0;
+        if (p.mode === 'token') this.token = newToken(); // one-time: used up once it pairs
+        // Bound to this proof: only the tab that proved it can derive it.
+        this.resume = hmac(p.key, proofText('resume', p.tabNonce, p.relayNonce));
         this.tab = { ws, origin };
-        this.send(ws, { type: 'welcome', protocol: PROTOCOL, resume: this.resume });
+        this.send(ws, { type: 'welcome', protocol: PROTOCOL });
         this.log(`Studio tab connected (${origin})`);
         return;
       }
@@ -176,11 +196,11 @@ export class Relay {
           this.onToolsChanged();
           break;
         case 'result': {
-          const p = this.pending.get(msg.id);
-          if (!p) break;
-          clearTimeout(p.timer);
+          const r = this.pending.get(msg.id);
+          if (!r) break;
+          clearTimeout(r.timer);
           this.pending.delete(msg.id);
-          p.resolve({ content: msg.content, isError: !!msg.isError });
+          r.resolve({ content: msg.content, isError: !!msg.isError });
           break;
         }
         case 'ping':
@@ -201,16 +221,9 @@ export class Relay {
     });
   }
 
-  /** Why a hello is refused, or null when it pairs. */
-  private pair(protocol: number, token: string): string | null {
-    if (protocol !== PROTOCOL) return `This relay speaks protocol ${PROTOCOL}, the Studio ${protocol}: update @atropical/stroq-studio-mcp`;
-    if (this.tab) return 'Another Studio tab is connected. Disconnect it first.';
-    if (this.resume && sameSecret(token, this.resume)) return null;
-    if (sameSecret(normalise(token), normalise(this.token))) {
-      this.wrong = 0;
-      this.token = newToken(); // one-time: used up once it pairs
-      return null;
-    }
+  /** A tab's proof did not match: counted; too many replace the token. */
+  private wrongProof(mode: 'token' | 'resume'): string {
+    if (mode === 'resume') return 'The resume key no longer matches: connect with the pairing token.';
     this.wrong++;
     if (this.wrong >= MAX_WRONG) {
       this.wrong = 0;
