@@ -172,7 +172,7 @@ export class Relay {
   /** Runs a tool in the tab. Never throws: errors come back as isError content. */
   call(name: string, args: Record<string, unknown>): Promise<{ content: Content[]; isError: boolean }> {
     const tab = this.tab;
-    if (!tab) return Promise.resolve(err(`No Studio tab is connected. In the Studio: Help → Connect an agent and paste ${this.pairing}.`));
+    if (!tab) return Promise.resolve(err(`No Studio tab is connected. In the Studio: Tools → AI agent → Connect… and paste ${this.pairing}.`));
     if (!this.toolList.some((t) => t.name === name)) return Promise.resolve(err(`The Studio has no tool "${name}"`));
     const id = this.nextId++;
     return new Promise((resolve) => {
@@ -197,7 +197,7 @@ export class Relay {
   }
 
   private announce() {
-    this.log(`Strōq Studio relay on ws://127.0.0.1:${this.port}. In the Studio: Help → Connect an agent and paste ${this.pairing}`);
+    this.log(`Strōq Studio relay on ws://127.0.0.1:${this.port}. In the Studio: Tools → AI agent → Connect… and paste ${this.pairing}`);
   }
 
   private accept(ws: WebSocket, origin: string) {

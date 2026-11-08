@@ -7,7 +7,7 @@ import { DEFAULT_ORIGINS, DEFAULT_PORT } from './relay.js';
 
 export const HELP = `Usage: stroq-studio-mcp [--port <n>] [--origin <url>]...
 
-Connects an MCP client (Claude Code, Claude Desktop) to an open Strōq World Studio tab.
+Connects any MCP client (Claude Code, Codex, Cursor, Claude Desktop…) to an open Strōq World Studio tab.
 
   --port <n>      Fixed WebSocket port on 127.0.0.1 (fails if busy). Default:
                   ${DEFAULT_PORT}, or any free port when that one is taken
@@ -15,7 +15,7 @@ Connects an MCP client (Claude Code, Claude Desktop) to an open Strōq World Stu
                   the defaults (${DEFAULT_ORIGINS.join(', ')})
   --help          This text
 
-The pairing string (port:TOKEN) is printed on stderr; paste it in the Studio under Help → Connect an agent.`;
+The pairing string (port:TOKEN) is printed on stderr; paste it in the Studio under Tools → AI agent → Connect….`;
 
 export function parseArgs(argv: string[]): { port?: number; origins: string[]; help: boolean } {
   let port: number | undefined;
