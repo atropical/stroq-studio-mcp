@@ -69,6 +69,16 @@ export type RelayMessage =
   | { type: 'ping' }
   | { type: 'pong' };
 
+/**
+ * import_model_file runs in the relay: it reads the file and sends it as
+ * import_model_part calls { upload, file, size, offset, data (base64) }, then
+ * calls the tab's import_model_file { upload, files: [{ name, size }], name?,
+ * category?, tags? }. The relay lists it only when the tab lists both, and
+ * never lists import_model_part.
+ */
+export const IMPORT_FILE = 'import_model_file';
+export const IMPORT_PART = 'import_model_part';
+
 /** Largest frame the relay accepts from the tab (screenshots are big). */
 export const MAX_FRAME = 32 * 1024 * 1024;
 

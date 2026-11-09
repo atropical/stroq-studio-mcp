@@ -92,6 +92,31 @@ tools appear (the relay sends `notifications/tools/list_changed`), for example
 `resolve_comment` and `wait_for_comments`. While connected the agent owns the
 Studio's comments.
 
+`import_model_file` is the one tool the relay handles itself: it reads a model
+from this computer (`path`, absolute; optional `name`, `category`, `tags`) and
+sends it to the tab in 1 MB parts over the sealed connection; the tab imports
+it into the Library the same way as the Library's own file import (optimised,
+scaled, thumbnail) and answers with the new asset id and its thumbnail. It is
+listed only while a connected tab offers it.
+
+## Using it with Blender MCP
+
+With [blender-mcp](https://github.com/ahujasid/blender-mcp) added alongside,
+an agent can model something in Blender and put it straight into the Studio:
+
+```sh
+claude mcp add stroq-studio -- npx -y @atropical/stroq-studio-mcp
+claude mcp add blender -- uvx blender-mcp
+```
+
+Open Blender with the blender-mcp add-on connected, connect the Studio, then
+ask, for example: "Model a small stone well in Blender, export it as GLB to
+/tmp/well.glb and add it to the Studio Library as a building." The agent
+models it through Blender MCP, exports with
+`bpy.ops.export_scene.gltf(filepath='/tmp/well.glb', export_format='GLB')`,
+and calls `import_model_file` with that path. Model in metres, Z up (the glTF
+exporter turns it Y up); the Studio scales it to a real height by category.
+
 ## Security
 
 - Listens on `127.0.0.1` only; nothing on your network can connect.
@@ -116,8 +141,12 @@ Studio's comments.
 - The resume key for reloads is derived from the proof on both sides and is
   never sent.
 - One tab at a time.
-- It stores nothing and reads no files: every tool runs inside the Studio tab,
-  on the content in that browser.
+- It stores nothing, and every tool runs inside the Studio tab, on the content
+  in that browser. The only files it reads are the ones you or your agent name
+  in `import_model_file`: a `.glb`, `.gltf` (with the buffers and images it
+  names, from its own folder) or `.zip`, at most 100 MB in all; it refuses
+  relative paths, symlinks and anything whose real path is outside the
+  model's folder.
 
 ## Protocol
 

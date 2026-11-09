@@ -17,7 +17,8 @@
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import type { IncomingMessage } from 'node:http';
 import { type WebSocket, WebSocketServer } from 'ws';
-import { type Content, MAX_FRAME, macText, PROTOCOL, parseTabMessage, proofText, type RelayMessage, type ToolInfo, tokenKey } from './protocol.js';
+import { CHUNK_BYTES, ModelFileError, readModelFiles } from './modelFile.js';
+import { type Content, IMPORT_FILE, IMPORT_PART, MAX_FRAME, macText, PROTOCOL, parseTabMessage, proofText, type RelayMessage, type ToolInfo, tokenKey } from './protocol.js';
 
 export const hmac = (key: string, text: string) => createHmac('sha256', key).update(text).digest('hex');
 
@@ -183,6 +184,38 @@ export class Relay {
       this.pending.set(id, { resolve, timer });
       this.send(tab.ws, { type: 'call', id, name, arguments: args });
     });
+  }
+
+  /** Whether the tab takes model files (it lists both import tools). */
+  get canImport(): boolean {
+    return !!this.tab && this.toolList.some((t) => t.name === IMPORT_FILE) && this.toolList.some((t) => t.name === IMPORT_PART);
+  }
+
+  /**
+   * import_model_file: reads the model here (modelFile.ts checks), sends it to
+   * the tab in CHUNK_BYTES parts (one import_model_part call each, in order,
+   * each answered before the next), then asks the tab to import it.
+   */
+  async importModelFile(args: Record<string, unknown>): Promise<{ content: Content[]; isError: boolean }> {
+    if (!this.tab) return this.call(IMPORT_FILE, {});
+    if (!this.canImport) return err('This Studio tab cannot import model files: reload it, or update the Studio');
+    let files: Awaited<ReturnType<typeof readModelFiles>>;
+    try {
+      files = await readModelFiles(args.path as string);
+    } catch (e) {
+      return err(e instanceof ModelFileError ? e.message : `Could not read the model: ${(e as Error).message}`);
+    }
+    const upload = randomBytes(12).toString('hex');
+    for (const f of files) {
+      for (let offset = 0; offset < f.data.length || offset === 0; offset += CHUNK_BYTES) {
+        const data = Buffer.from(f.data.subarray(offset, offset + CHUNK_BYTES)).toString('base64');
+        const r = await this.call(IMPORT_PART, { upload, file: f.name, size: f.data.length, offset, data });
+        if (r.isError) return r;
+        if (f.data.length === 0) break;
+      }
+    }
+    const pick = (k: string) => (args[k] === undefined ? {} : { [k]: args[k] });
+    return this.call(IMPORT_FILE, { upload, files: files.map((f) => ({ name: f.name, size: f.data.length })), ...pick('name'), ...pick('category'), ...pick('tags') });
   }
 
   private allowed(origin: string, req: IncomingMessage): boolean {
