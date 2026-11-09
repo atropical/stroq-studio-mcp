@@ -1,6 +1,6 @@
 {
   "name": "@atropical/stroq-studio-mcp",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "Connects any MCP client (Claude Code, Codex, Cursor, Claude Desktop…) to an open Strōq World Studio tab, over a local WebSocket.",
   "license": "GPL-3.0-only",
   "author": "Atropical",
