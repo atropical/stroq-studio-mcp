@@ -1,19 +1,45 @@
 {
   "name": "@atropical/stroq-studio-mcp",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Connects any MCP client (Claude Code, Codex, Cursor, Claude Desktop…) to an open Strōq World Studio tab, over a local WebSocket.",
   "license": "GPL-3.0-only",
   "author": "Atropical",
   "homepage": "https://github.com/atropical/stroq-studio-mcp#readme",
-  "repository": { "type": "git", "url": "git+https://github.com/atropical/stroq-studio-mcp.git" },
-  "bugs": { "url": "https://github.com/atropical/stroq-studio-mcp/issues" },
-  "keywords": ["mcp", "model-context-protocol", "stroq", "world-studio", "claude", "codex", "cursor"],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/atropical/stroq-studio-mcp.git"
+  },
+  "bugs": {
+    "url": "https://github.com/atropical/stroq-studio-mcp/issues"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "stroq",
+    "world-studio",
+    "claude",
+    "codex",
+    "cursor"
+  ],
   "type": "module",
-  "bin": { "stroq-studio-mcp": "dist/cli.js" },
-  "exports": { ".": "./dist/relay.js" },
-  "files": ["dist/*.js", "dist/*.d.ts", "README.md", "LICENSE"],
-  "engines": { "node": ">=20" },
-  "publishConfig": { "access": "public" },
+  "bin": {
+    "stroq-studio-mcp": "dist/cli.js"
+  },
+  "exports": {
+    ".": "./dist/relay.js"
+  },
+  "files": [
+    "dist/*.js",
+    "dist/*.d.ts",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "build": "rm -rf dist && tsc -p tsconfig.build.json && chmod +x dist/cli.js",
     "type-check": "tsc --noEmit",
