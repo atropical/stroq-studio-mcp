@@ -332,6 +332,25 @@ describe('sealed frames', () => {
       t.seal({ type: 'result', id: c.id, content: [{ type: 'text', text: 'too big' }], isError: true });
       expect(await q).toEqual({ content: [{ type: 'text', text: 'too big' }], isError: true });
       expect((await r.importModelFile({ path: '/etc/passwd' })).isError).toBe(true);
+
+      // A low-poly version goes up as its own upload after the model, with the same checks.
+      const low = Buffer.concat([Buffer.from('glTF'), randomBytes(200)]);
+      writeFileSync(join(dir, 'tower_low.glb'), low);
+      const lp = r.importModelFile({ path: join(dir, 'tower_low.glb'), lowPolyPath: join(dir, 'tower_low.glb') });
+      const a = (await t.next('call')) as { id: number; arguments: { upload: string } };
+      t.seal({ type: 'result', id: a.id, content: [{ type: 'text', text: 'ok' }] });
+      const b = (await t.next('call')) as { id: number; name: string; arguments: { upload: string; data: string } };
+      expect(b.name).toBe(IMPORT_PART);
+      expect(b.arguments.upload).not.toBe(a.arguments.upload);
+      expect(Buffer.from(b.arguments.data, 'base64').equals(low)).toBe(true);
+      t.seal({ type: 'result', id: b.id, content: [{ type: 'text', text: 'ok' }] });
+      const f2 = (await t.next('call')) as { id: number; arguments: Record<string, unknown> };
+      expect(f2.arguments).toMatchObject({ upload: a.arguments.upload, lowPolyUpload: b.arguments.upload, lowPolyFiles: [{ name: 'tower_low.glb', size: low.length }] });
+      t.seal({ type: 'result', id: f2.id, content: [{ type: 'text', text: '{}' }] });
+      expect((await lp).isError).toBe(false);
+      writeFileSync(join(dir, 'fake.glb'), 'nope');
+      const bad = await r.importModelFile({ path: join(dir, 'tower_low.glb'), lowPolyPath: join(dir, 'fake.glb') });
+      expect(bad).toMatchObject({ isError: true, content: [{ text: expect.stringContaining('Low-poly version') }] });
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

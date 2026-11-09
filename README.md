@@ -109,11 +109,14 @@ If an agent stops listening, the standard MCP prompt `watch_studio` (or saying
 waiting for the next one.") starts the loop again.
 
 `import_model_file` is the one tool the relay handles itself: it reads a model
-from this computer (`path`, absolute; optional `name`, `category`, `tags`) and
-sends it to the tab in 1 MB parts over the sealed connection; the tab imports
+from this computer (`path`, absolute; optional `lowPolyPath`, `name`,
+`category`, `tags`) and sends it to the tab in 1 MB parts over the sealed connection; the tab imports
 it into the Library the same way as the Library's own file import (optimised,
 scaled, thumbnail) and answers with the new asset id and its thumbnail. It is
-listed only while a connected tab offers it.
+listed only while a connected tab offers it. `lowPolyPath` is the model's
+low-poly version (the fallback on weaker GPUs), checked and sent the same way;
+without one the Studio makes one itself, as the Workbench's "Make low-poly"
+does, and the result says so.
 
 ## Using it with Blender MCP
 
@@ -130,7 +133,11 @@ ask, for example: "Model a small stone well in Blender, export it as GLB to
 /tmp/well.glb and add it to the Studio Library as a building." The agent
 models it through Blender MCP, exports with
 `bpy.ops.export_scene.gltf(filepath='/tmp/well.glb', export_format='GLB')`,
-and calls `import_model_file` with that path. Model in metres, Z up (the glTF
+also makes a low-poly version (flat-coloured, about 1–2k triangles, e.g. a
+Decimate modifier on a copy, exported to `/tmp/well_low.glb`) and calls
+`import_model_file` with both paths (`path` and `lowPolyPath`). Agents are told
+to always send one for a model they create, and never to show you the
+temporary file paths. Model in metres, Z up (the glTF
 exporter turns it Y up); the Studio scales it to a real height by category.
 
 ## Security

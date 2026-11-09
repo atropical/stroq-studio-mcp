@@ -200,22 +200,42 @@ export class Relay {
     if (!this.tab) return this.call(IMPORT_FILE, {});
     if (!this.canImport) return err('This Studio tab cannot import model files: reload it, or update the Studio');
     let files: Awaited<ReturnType<typeof readModelFiles>>;
+    let lowPoly: typeof files | null = null;
     try {
       files = await readModelFiles(args.path as string);
     } catch (e) {
       return err(e instanceof ModelFileError ? e.message : `Could not read the model: ${(e as Error).message}`);
     }
-    const upload = randomBytes(12).toString('hex');
-    for (const f of files) {
-      for (let offset = 0; offset < f.data.length || offset === 0; offset += CHUNK_BYTES) {
-        const data = Buffer.from(f.data.subarray(offset, offset + CHUNK_BYTES)).toString('base64');
-        const r = await this.call(IMPORT_PART, { upload, file: f.name, size: f.data.length, offset, data });
-        if (r.isError) return r;
-        if (f.data.length === 0) break;
+    if (args.lowPolyPath !== undefined) {
+      try {
+        lowPoly = await readModelFiles(args.lowPolyPath as string);
+      } catch (e) {
+        return err(`Low-poly version: ${e instanceof ModelFileError ? e.message : `could not read it: ${(e as Error).message}`}`);
       }
     }
+    const send = async (fs: typeof files) => {
+      const upload = randomBytes(12).toString('hex');
+      for (const f of fs) {
+        for (let offset = 0; offset < f.data.length || offset === 0; offset += CHUNK_BYTES) {
+          const data = Buffer.from(f.data.subarray(offset, offset + CHUNK_BYTES)).toString('base64');
+          const r = await this.call(IMPORT_PART, { upload, file: f.name, size: f.data.length, offset, data });
+          if (r.isError) return r;
+          if (f.data.length === 0) break;
+        }
+      }
+      return upload;
+    };
+    const upload = await send(files);
+    if (typeof upload !== 'string') return upload;
+    const list = (fs: typeof files) => fs.map((f) => ({ name: f.name, size: f.data.length }));
+    let low = {};
+    if (lowPoly) {
+      const lowUpload = await send(lowPoly);
+      if (typeof lowUpload !== 'string') return lowUpload;
+      low = { lowPolyUpload: lowUpload, lowPolyFiles: list(lowPoly) };
+    }
     const pick = (k: string) => (args[k] === undefined ? {} : { [k]: args[k] });
-    return this.call(IMPORT_FILE, { upload, files: files.map((f) => ({ name: f.name, size: f.data.length })), ...pick('name'), ...pick('category'), ...pick('tags') });
+    return this.call(IMPORT_FILE, { upload, files: list(files), ...low, ...pick('name'), ...pick('category'), ...pick('tags') });
   }
 
   private allowed(origin: string, req: IncomingMessage): boolean {

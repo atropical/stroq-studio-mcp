@@ -72,8 +72,9 @@ export type RelayMessage =
 /**
  * import_model_file runs in the relay: it reads the file and sends it as
  * import_model_part calls { upload, file, size, offset, data (base64) }, then
- * calls the tab's import_model_file { upload, files: [{ name, size }], name?,
- * category?, tags? }. The relay lists it only when the tab lists both, and
+ * calls the tab's import_model_file { upload, files: [{ name, size }],
+ * lowPolyUpload?, lowPolyFiles?, name?, category?, tags? } (a low-poly version, when
+ * given, goes up as its own upload, after the model). The relay lists it only when the tab lists both, and
  * never lists import_model_part.
  */
 export const IMPORT_FILE = 'import_model_file';

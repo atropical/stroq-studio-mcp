@@ -23,11 +23,12 @@ export const CONNECTION_TOOL = {
 /** Handled here, not passed through: the relay reads the file and sends it to the tab in parts. */
 export const IMPORT_TOOL = {
   name: IMPORT_FILE,
-  description: `Adds a model file from this computer to the Studio Library (optimised, scaled, with a thumbnail). For a model made in Blender: export it as GLB (File → Export → glTF 2.0, format glb) to an absolute path, then call this. Takes .glb, .gltf (its buffers and textures from the same folder) or .zip, up to ${MAX_MODEL_BYTES / 1048576} MB; no symlinks. Returns the new asset id and its thumbnail.`,
+  description: `Adds a model file from this computer to the Studio Library (optimised, scaled, with a thumbnail). For a model made in Blender: export it as GLB (File → Export → glTF 2.0, format glb) to an absolute path, then call this. Takes .glb, .gltf (its buffers and textures from the same folder) or .zip, up to ${MAX_MODEL_BYTES / 1048576} MB; no symlinks. When you create a model, always make and send a low-poly version too (lowPolyPath): a flat-coloured, ~1–2k triangle version of the same object, the fallback on weaker GPUs; without one the Studio makes one automatically. Never show the person temporary file paths. Returns the new asset id and both thumbnails.`,
   inputSchema: {
     type: 'object' as const,
     properties: {
       path: { type: 'string', description: 'Absolute path of the .glb, .gltf or .zip' },
+      lowPolyPath: { type: 'string', description: 'Absolute path of the low-poly version (.glb, .gltf or .zip; same checks and size cap). Always send one for a model you created' },
       name: { type: 'string', description: 'Name in the Library (default: from the file name)' },
       category: { type: 'string', enum: ['prop', 'plant', 'rock', 'tree', 'building', 'vehicle', 'character'], description: 'Library category (default prop)' },
       tags: { type: 'array', items: { type: 'string' }, description: 'Search tags' },
@@ -50,15 +51,17 @@ export const WAIT_TOOL = {
   inputSchema: { type: 'object' as const, properties: { timeoutSec: { type: 'integer', minimum: 1, maximum: WAIT_MAX_S, description: `Seconds to wait (default and max ${WAIT_MAX_S})` } } },
 };
 
+export const MODEL_RULE = 'When you create a model for the Studio, always make and send a low-poly version too (import_model_file lowPolyPath: a flat-coloured, ~1–2k triangle version of the same object), and never show the person temporary file paths.';
+
 export const WATCH_PROMPT = {
   name: 'watch_studio',
   description: 'Watch the Strōq Studio: handle every comment and Ask as it comes in, and keep waiting for the next one.',
 };
-export const WATCH_TEXT = `Watch the Strōq Studio: handle every comment and Ask as it comes in, and keep waiting for the next one. ${LOOP} If the Studio is not paired yet, call studio_connection first and tell the person the pairing string.`;
+export const WATCH_TEXT = `Watch the Strōq Studio: handle every comment and Ask as it comes in, and keep waiting for the next one. ${LOOP} If the Studio is not paired yet, call studio_connection first and tell the person the pairing string. ${MODEL_RULE}`;
 
 const HIDDEN = new Set([CONNECTION_TOOL.name, IMPORT_FILE, IMPORT_PART, WAIT_TOOL.name]);
 
-export const INSTRUCTIONS = `Tools of an open Strōq World Studio tab, relayed. If no tab is connected yet, call studio_connection and tell the person the pairing string (port:TOKEN) to paste under Tools → AI agent → Connect…. This agent owns the Studio's comments and Asks, and the person expects answers without prompting you again: ${LOOP}`;
+export const INSTRUCTIONS = `Tools of an open Strōq World Studio tab, relayed. If no tab is connected yet, call studio_connection and tell the person the pairing string (port:TOKEN) to paste under Tools → AI agent → Connect…. This agent owns the Studio's comments and Asks, and the person expects answers without prompting you again: ${LOOP} ${MODEL_RULE}`;
 
 const text = (t: string) => ({ type: 'text' as const, text: t });
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
