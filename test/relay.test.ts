@@ -2,7 +2,11 @@ import { afterEach, describe, expect, it } from 'bun:test';
 import { randomBytes } from 'node:crypto';
 import WebSocket from 'ws';
 import { parseArgs } from '../src/args.js';
-import { macText, parseTabMessage, PROTOCOL, proofText, tokenKey } from '../src/protocol.js';
+import { mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { CHUNK_BYTES } from '../src/modelFile.js';
+import { IMPORT_FILE, IMPORT_PART, macText, parseTabMessage, PROTOCOL, proofText, tokenKey } from '../src/protocol.js';
 import { hmac, newToken, Relay } from '../src/relay.js';
 
 let port = 39100 + Math.floor(Math.random() * 500);
@@ -290,6 +294,47 @@ describe('sealed frames', () => {
     t.seal({ type: 'result', id: c.id, content: [{ type: 'text', text: '[]' }] });
     expect(await p).toEqual({ content: [{ type: 'text', text: '[]' }], isError: false });
     expect((await r.call('nope', {})).isError).toBe(true);
+  });
+
+  it('import_model_file: only with a tab that lists both tools; sends the file in order, in chunks, then imports it', async () => {
+    const r = await startRelay();
+    const t = await paired(r);
+    expect(r.canImport).toBe(false);
+    expect((await r.importModelFile({ path: '/x.glb' })).content[0]).toMatchObject({ text: expect.stringContaining('cannot import') });
+    const schema = { type: 'object', properties: {} };
+    t.seal({ type: 'tools', tools: [...TOOLS, { name: IMPORT_FILE, inputSchema: schema }, { name: IMPORT_PART, inputSchema: schema }] });
+    await Bun.sleep(30);
+    expect(r.canImport).toBe(true);
+
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), 'stroq-relay-model-')));
+    try {
+      const bytes = Buffer.concat([Buffer.from("glTF"), randomBytes(CHUNK_BYTES * 2 + 119)]);
+      writeFileSync(join(dir, 'tower.glb'), bytes);
+      const p = r.importModelFile({ path: join(dir, 'tower.glb'), name: 'Tower', category: 'building', tags: ['stone'] });
+      const got: Buffer[] = [];
+      for (let i = 0; i < 3; i++) {
+        const c = (await t.next('call')) as { id: number; name: string; arguments: { upload: string; file: string; size: number; offset: number; data: string } };
+        expect(c.name).toBe(IMPORT_PART);
+        expect(c.arguments).toMatchObject({ file: 'tower.glb', size: bytes.length, offset: i * CHUNK_BYTES });
+        expect(c.arguments.data.length).toBeLessThan(CHUNK_BYTES * 1.4);
+        got.push(Buffer.from(c.arguments.data, 'base64'));
+        t.seal({ type: 'result', id: c.id, content: [{ type: 'text', text: 'ok' }] });
+      }
+      expect(Buffer.concat(got).equals(bytes)).toBe(true);
+      const fin = (await t.next('call')) as { id: number; name: string; arguments: Record<string, unknown> };
+      expect(fin).toMatchObject({ name: IMPORT_FILE, arguments: { files: [{ name: 'tower.glb', size: bytes.length }], name: 'Tower', category: 'building', tags: ['stone'] } });
+      t.seal({ type: 'result', id: fin.id, content: [{ type: 'text', text: '{"id":"tower"}' }] });
+      expect((await p).isError).toBe(false);
+
+      // A refused part stops the upload; a bad path never reaches the tab.
+      const q = r.importModelFile({ path: join(dir, 'tower.glb') });
+      const c = (await t.next('call')) as { id: number };
+      t.seal({ type: 'result', id: c.id, content: [{ type: 'text', text: 'too big' }], isError: true });
+      expect(await q).toEqual({ content: [{ type: 'text', text: 'too big' }], isError: true });
+      expect((await r.importModelFile({ path: '/etc/passwd' })).isError).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it('closes on a tampered frame', async () => {
