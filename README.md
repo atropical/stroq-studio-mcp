@@ -143,10 +143,13 @@ exporter turns it Y up); the Studio scales it to a real height by category.
 - One tab at a time.
 - It stores nothing, and every tool runs inside the Studio tab, on the content
   in that browser. The only files it reads are the ones you or your agent name
-  in `import_model_file`: a `.glb`, `.gltf` (with the buffers and images it
-  names, from its own folder) or `.zip`, at most 100 MB in all; it refuses
-  relative paths, symlinks and anything whose real path is outside the
-  model's folder.
+  in `import_model_file`: a `.glb`, a `.gltf` or a `.zip`, at most 100 MB in
+  all. A glTF (also inside a zip) may bring only `.bin` buffers whose size
+  matches their `byteLength` and PNG, JPEG, WebP or KTX2 images whose first
+  bytes match their type, from its folder and at most two levels down; a zip
+  holds only those and the model. It refuses relative paths, symlinks, hidden
+  files or folders (a name starting with `.`) and anything whose real path is
+  outside the model's folder.
 
 ## Protocol
 

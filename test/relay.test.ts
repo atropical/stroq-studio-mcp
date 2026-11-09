@@ -308,7 +308,7 @@ describe('sealed frames', () => {
 
     const dir = realpathSync(mkdtempSync(join(tmpdir(), 'stroq-relay-model-')));
     try {
-      const bytes = randomBytes(CHUNK_BYTES * 2 + 123);
+      const bytes = Buffer.concat([Buffer.from("glTF"), randomBytes(CHUNK_BYTES * 2 + 119)]);
       writeFileSync(join(dir, 'tower.glb'), bytes);
       const p = r.importModelFile({ path: join(dir, 'tower.glb'), name: 'Tower', category: 'building', tags: ['stone'] });
       const got: Buffer[] = [];
