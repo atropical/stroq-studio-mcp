@@ -36,6 +36,14 @@ export const FREE_STRIKES_PER_MIN = 30;
 /** Delay per strike past the free ones, and its cap. */
 export const STRIKE_DELAY_MS = 250;
 export const MAX_DELAY_MS = 5_000;
+/**
+ * A tab that goes away (a reload) has this long to resume before the relay
+ * counts it gone: the tool list stays, calls made meanwhile wait for it, and a
+ * pending wait_for_comments carries on in the tab that comes back.
+ */
+export const GRACE_MS = 30_000;
+/** Said when a tab went away and did not come back within GRACE_MS. */
+export const TAB_GONE = 'The Studio tab is not connected (it went away and did not come back in time)';
 
 /** The one string the person pastes into the Studio: port and token. */
 export const pairingString = (port: number, token: string) => `${port}:${token}`;
@@ -66,7 +74,13 @@ function sameSecret(a: string, b: string): boolean {
   return x.length === y.length && timingSafeEqual(x, y);
 }
 
-export type RelayStatus = { state: 'waiting'; pairing: string; token: string; port: number } | { state: 'connected'; origin: string; tools: number; port: number };
+export type RelayStatus =
+  | { state: 'waiting'; pairing: string; token: string; port: number }
+  | { state: 'connected'; origin: string; tools: number; port: number }
+  | { state: 'reconnecting'; origin: string; tools: number; port: number; pairing: string; token: string };
+
+/** A call's result; `dropped`: the tab went away before answering (it may or may not have run it). */
+export type CallResult = { content: Content[]; isError: boolean; dropped?: boolean };
 
 export interface RelayOptions {
   /** A fixed port (fails when busy). Without it: DEFAULT_PORT, else any free port. */
@@ -75,10 +89,12 @@ export interface RelayOptions {
   /** Where messages for the person go (stderr in the CLI; stdout belongs to MCP). */
   log?: (line: string) => void;
   onToolsChanged?: () => void;
+  /** How long a dropped tab may take to resume (default GRACE_MS). */
+  graceMs?: number;
 }
 
 interface Pending {
-  resolve: (r: { content: Content[]; isError: boolean }) => void;
+  resolve: (r: CallResult) => void;
   timer: ReturnType<typeof setTimeout>;
 }
 
@@ -96,10 +112,14 @@ export class Relay {
   /** When failed or unfinished token handshakes ended (last minute). */
   private strikes: number[] = [];
   private toolList: ToolInfo[] = [];
+  /** While a dropped tab may resume: when the grace ends, its timer, and who waits for the tab. */
+  private grace: { origin: string; until: number; timer: ReturnType<typeof setTimeout> } | null = null;
+  private resumed: Array<() => void> = [];
   private nextId = 1;
   private pending = new Map<number, Pending>();
   private log: (line: string) => void;
   private onToolsChanged: () => void;
+  private graceMs: number;
 
   constructor(opts: RelayOptions = {}) {
     this.fixedPort = opts.port ?? null;
@@ -107,6 +127,7 @@ export class Relay {
     this.origins = opts.origins ?? DEFAULT_ORIGINS;
     this.log = opts.log ?? (() => undefined);
     this.onToolsChanged = opts.onToolsChanged ?? (() => undefined);
+    this.graceMs = opts.graceMs ?? GRACE_MS;
   }
 
   get pairingToken() {
@@ -118,12 +139,42 @@ export class Relay {
     return pairingString(this.port, this.token);
   }
 
+  /** The tab's tools; kept while a dropped tab may still resume (GRACE_MS). */
   get tools(): ToolInfo[] {
-    return this.tab ? this.toolList : [];
+    return this.tab || this.grace ? this.toolList : [];
+  }
+
+  /** Whether a tab is linked, or dropped and may still resume. */
+  get linked(): boolean {
+    return !!this.tab || !!this.grace;
   }
 
   status(): RelayStatus {
-    return this.tab ? { state: 'connected', origin: this.tab.origin, tools: this.toolList.length, port: this.port } : { state: 'waiting', pairing: this.pairing, token: this.token, port: this.port };
+    if (this.tab) return { state: 'connected', origin: this.tab.origin, tools: this.toolList.length, port: this.port };
+    if (this.grace) return { state: 'reconnecting', origin: this.grace.origin, tools: this.toolList.length, port: this.port, pairing: this.pairing, token: this.token };
+    return { state: 'waiting', pairing: this.pairing, token: this.token, port: this.port };
+  }
+
+  /** Resolves true once a tab is connected (with its tool list), false at `until` or when the grace ends without one. */
+  waitForTab(until: number): Promise<boolean> {
+    if (this.tab) return Promise.resolve(true);
+    if (!this.grace) return Promise.resolve(false);
+    return new Promise((resolve) => {
+      const done = (ok: boolean) => {
+        clearTimeout(t);
+        this.resumed = this.resumed.filter((f) => f !== wake);
+        resolve(ok);
+      };
+      const wake = () => done(!!this.tab);
+      const t = setTimeout(() => done(false), Math.max(0, until - Date.now()));
+      this.resumed.push(wake);
+    });
+  }
+
+  private wakeWaiters() {
+    const w = this.resumed;
+    this.resumed = [];
+    for (const f of w) f();
   }
 
   /** Starts listening on 127.0.0.1: the fixed port, else DEFAULT_PORT, else any free port (said on the log). */
@@ -162,6 +213,9 @@ export class Relay {
     this.failAll('The relay stopped');
     this.tab?.ws.close(1001, 'relay stopping');
     this.tab = null;
+    if (this.grace) clearTimeout(this.grace.timer);
+    this.grace = null;
+    this.wakeWaiters();
     const wss = this.wss;
     this.wss = null;
     if (wss) {
@@ -171,12 +225,14 @@ export class Relay {
   }
 
   /** Runs a tool in the tab. Never throws: errors come back as isError content. */
-  call(name: string, args: Record<string, unknown>): Promise<{ content: Content[]; isError: boolean }> {
+  async call(name: string, args: Record<string, unknown>): Promise<CallResult> {
+    // A dropped tab (a reload): wait for it to resume, within the grace period.
+    if (!this.tab && this.grace && !(await this.waitForTab(this.grace.until))) return err(`${TAB_GONE}. Reload the Studio, or connect again with ${this.pairing}.`);
     const tab = this.tab;
-    if (!tab) return Promise.resolve(err(`No Studio tab is connected. In the Studio: Tools → AI agent → Connect… and paste ${this.pairing}.`));
+    if (!tab) return err(`No Studio tab is connected. In the Studio: Tools → AI agent → Connect… and paste ${this.pairing}.`);
     if (!this.toolList.some((t) => t.name === name)) return Promise.resolve(err(`The Studio has no tool "${name}"`));
     const id = this.nextId++;
-    return new Promise((resolve) => {
+    return new Promise<CallResult>((resolve) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
         resolve(err(`"${name}" took longer than ${CALL_TIMEOUT_MS / 60_000} minutes`));
@@ -196,7 +252,7 @@ export class Relay {
    * the tab in CHUNK_BYTES parts (one import_model_part call each, in order,
    * each answered before the next), then asks the tab to import it.
    */
-  async importModelFile(args: Record<string, unknown>): Promise<{ content: Content[]; isError: boolean }> {
+  async importModelFile(args: Record<string, unknown>): Promise<CallResult> {
     if (!this.tab) return this.call(IMPORT_FILE, {});
     if (!this.canImport) return err('This Studio tab cannot import model files: reload it, or update the Studio');
     let files: Awaited<ReturnType<typeof readModelFiles>>;
@@ -302,6 +358,8 @@ export class Relay {
         this.resume = hmac(p.key, proofText('resume', this.port, p.tabNonce, p.relayNonce));
         session = hmac(p.key, proofText('session', this.port, p.tabNonce, p.relayNonce));
         this.tab = { ws, origin, session, seqOut: 0 };
+        // A tab back within the grace period: its tool list arrives next and wakes who waits.
+        if (this.grace) clearTimeout(this.grace.timer);
         this.send(ws, { type: 'welcome', protocol: PROTOCOL });
         this.log(`Studio tab connected (${origin})`);
         return;
@@ -312,10 +370,15 @@ export class Relay {
       const inner = parseTabMessage(msg.body);
       if (!inner) return ws.close(4001, 'bad frame');
       switch (inner.type) {
-        case 'tools':
+        case 'tools': {
+          // After a resume the same list says nothing new: no list_changed for a reload.
+          const same = !!this.grace && JSON.stringify(inner.tools) === JSON.stringify(this.toolList);
+          this.grace = null;
           this.toolList = inner.tools;
-          this.onToolsChanged();
+          if (!same) this.onToolsChanged();
+          this.wakeWaiters();
           break;
+        }
         case 'result': {
           const r = this.pending.get(inner.id);
           if (!r) break;
@@ -333,17 +396,21 @@ export class Relay {
           return ws.close(4001, 'bad frame');
       }
     });
-    ws.on('close', () => {
+    ws.on('close', (code) => {
       clearTimeout(timer);
       // A token handshake that failed or was never finished counts; a successful one never does.
       if (!paired && attempt?.mode === 'token') this.strikes.push(Date.now());
       if (!paired || this.tab?.ws !== ws) return;
       this.tab = null;
-      this.toolList = [];
-      this.failAll('The Studio tab disconnected');
-      this.onToolsChanged();
+      // Calls the tab never answered: wait_for_comments carries on in the tab that resumes (mcp.ts).
+      this.failAll('The Studio tab went away before answering; it may or may not have run it', true);
       this.token = newToken();
-      this.log('Studio tab disconnected (reloading the same tab reconnects by itself).');
+      // Switched off in the Studio (1000), or closed for a bad frame (4xxx): no resume.
+      if (code === 1000 || code >= 4000) return this.gone(code === 1000 ? 'Studio tab switched off.' : 'Studio tab disconnected.');
+      if (this.grace) clearTimeout(this.grace.timer);
+      // Tools and waiters only change if the tab does not come back in time (or once it never had tools).
+      this.grace = { origin, until: Date.now() + GRACE_MS, timer: setTimeout(() => this.gone('The Studio tab did not come back.'), this.graceMs) };
+      this.log(`Studio tab disconnected; waiting ${Math.round(this.graceMs / 1000)} s for it to resume (reloading the same tab reconnects by itself).`);
       this.announce();
     });
   }
@@ -368,10 +435,21 @@ export class Relay {
     return 'Wrong pairing token. Copy the one the relay printed.';
   }
 
-  private failAll(why: string) {
+  /** The tab is gone for good: no tools, waiters told, the person told how to pair again. */
+  private gone(line: string) {
+    if (this.grace) clearTimeout(this.grace.timer);
+    this.grace = null;
+    this.toolList = [];
+    this.onToolsChanged();
+    this.wakeWaiters();
+    this.log(line);
+    this.announce();
+  }
+
+  private failAll(why: string, dropped = false) {
     for (const [id, p] of this.pending) {
       clearTimeout(p.timer);
-      p.resolve(err(why));
+      p.resolve(dropped ? { ...err(why), dropped: true } : err(why));
       this.pending.delete(id);
     }
   }

@@ -39,7 +39,7 @@ export const IMPORT_TOOL = {
 
 /** The watch loop, said the same way everywhere (tool results, instructions, the prompt). */
 export const LOOP =
-  'Call wait_for_comments, and keep calling it in a loop: each call returns within about 50 s, either with the comments and Asks waiting (for each: ack_comment straight away, get_comment for the picture and thread, do the work, reply_comment saying what changed) or with "nothing new", and then you call it again. Keep looping until the person tells you to stop.';
+  'Call wait_for_comments, and keep calling it in a loop: each call returns within about 50 s, either with the comments and Asks waiting (for each: ack_comment straight away, get_comment for the picture and thread, do the work, reply_comment saying what changed) or with "nothing new", and then you call it again. Keep calling it even if the Studio tab disconnects or reloads (it resumes by itself); only stop when the person tells you to.';
 
 /** Longest one wait_for_comments call may take, so it returns before common client tool timeouts (~60 s). */
 export const WAIT_MAX_S = 45;
@@ -47,7 +47,7 @@ export const WAIT_MAX_S = 45;
 /** Handled here: waits for the tab to pair, then passes the rest of the wait to the tab's own wait_for_comments. */
 export const WAIT_TOOL = {
   name: 'wait_for_comments',
-  description: `Waits for comments and Asks from the person in the Studio and returns them; works before the tab has paired too (it waits for the pairing first). Returns within ${WAIT_MAX_S} s; "nothing new" means call it again. Use it as a loop: handle each one (ack_comment, get_comment, do the work, reply_comment), then call wait_for_comments again, until the person stops you.`,
+  description: `Waits for comments and Asks from the person in the Studio and returns them; works before the tab has paired too (it waits for the pairing first). Returns within ${WAIT_MAX_S} s; "nothing new" means call it again. Use it as a loop: handle each one (ack_comment, get_comment, do the work, reply_comment), then call wait_for_comments again. Keep calling it even if the tab disconnects (it resumes by itself); only stop when the person tells you to.`,
   inputSchema: { type: 'object' as const, properties: { timeoutSec: { type: 'integer', minimum: 1, maximum: WAIT_MAX_S, description: `Seconds to wait (default and max ${WAIT_MAX_S})` } } },
 };
 
@@ -72,7 +72,9 @@ export function connectionResult(relay: Relay) {
   const next =
     s.state === 'waiting'
       ? `Tell the person this pairing string (${s.pairing}) to paste under Tools → AI agent → Connect…, then call wait_for_comments: it waits for the tab to pair and then for comments and Asks. ${LOOP}`
-      : `Paired. ${LOOP}`;
+      : s.state === 'reconnecting'
+        ? `The Studio tab went away (a reload?) and has 30 s to resume by itself. ${LOOP}`
+        : `Paired. ${LOOP}`;
   return { content: [text(JSON.stringify({ ...s, next }, null, 2))] };
 }
 
@@ -83,8 +85,12 @@ export async function waitForComments(relay: Relay, args: Record<string, unknown
   const ready = () => relay.tools.some((t) => t.name === WAIT_TOOL.name);
   while (!ready() && Date.now() < until) await sleep(100);
   if (!ready()) return { content: [text(JSON.stringify({ waiting: [], paired: false, next: 'The Studio has not paired yet: call wait_for_comments again.' }))] };
-  const left = Math.max(1, Math.floor((until - Date.now()) / 1000));
-  const r = await relay.call(WAIT_TOOL.name, { timeoutSec: left });
+  let r = await relay.call(WAIT_TOOL.name, { timeoutSec: Math.max(1, Math.floor((until - Date.now()) / 1000)) });
+  // The tab went away mid-wait (a reload): carry on in the tab that resumes, until the deadline.
+  while (r.dropped || (r.isError && !relay.linked)) {
+    if (!(await relay.waitForTab(until - 1000))) return { content: [text(JSON.stringify({ waiting: [], paired: relay.linked, next: 'The Studio tab is not connected right now; call wait_for_comments again.' }))] };
+    r = await relay.call(WAIT_TOOL.name, { timeoutSec: Math.max(1, Math.floor((until - Date.now()) / 1000)) });
+  }
   if (r.isError) return r;
   let none = false;
   try {

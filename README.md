@@ -62,6 +62,11 @@ A code is used up once a tab pairs with it. Reloading the same tab reconnects
 by itself; another tab, or a new relay, needs a new code (the relay prints one
 each time a tab disconnects).
 
+While a tab reloads the relay waits up to 30 s for it to come back: the tool
+list stays, a pending `wait_for_comments` carries on in the tab that resumes,
+and other calls wait for it. If it does not come back, `wait_for_comments`
+says "not connected, call again" (never an error) and the tools go.
+
 Your browser may ask whether the Studio may reach devices on this computer or
 local network: allow it, or the tab cannot reach the relay.
 

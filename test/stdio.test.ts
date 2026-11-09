@@ -85,6 +85,6 @@ it('offers the watch_studio prompt', async () => {
   const p = await client.getPrompt({ name: 'watch_studio' });
   const t = (p.messages[0]!.content as { text: string }).text;
   expect(t).toContain('wait_for_comments');
-  expect(t).toContain('until the person tells you to stop');
+  expect(t).toContain('only stop when the person tells you to');
   expect(client.getInstructions()).toContain('keep calling it in a loop');
 });
