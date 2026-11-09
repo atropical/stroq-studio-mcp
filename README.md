@@ -83,14 +83,30 @@ the MCP config, e.g.
 
 ## Tools
 
-Until a tab is connected the relay lists one tool, `studio_connection`
-(connection state and the pairing code). Once a tab connects, the tab's
+Until a tab is connected the relay lists two tools, `studio_connection`
+(connection state, the pairing code and what to do next) and
+`wait_for_comments`. Once a tab connects, the tab's
 tools appear (the relay sends `notifications/tools/list_changed`), for example
 `list_routes`, `put_route`, `validate_route`, `scatter`, `apply_landscape`,
 `screenshot` (as an image), and the comment tools `list_comments`,
 `get_comment` (with its screenshot), `ack_comment`, `reply_comment`,
 `resolve_comment` and `wait_for_comments`. While connected the agent owns the
 Studio's comments.
+
+## Watching for comments and Asks
+
+MCP agents only act when prompted, so the relay leads them into a watch loop
+through plain tool results, the same in every client. `studio_connection`
+says: tell the person the pairing string, then call `wait_for_comments`.
+`wait_for_comments` is handled by the relay: before pairing it waits for the
+tab, then for comments and Asks, and it always returns within 45 s (under
+common client tool timeouts) with what is waiting or "nothing new: call
+wait_for_comments again". The server instructions say the same: ack,
+get_comment, do the work, reply_comment, wait again, until the person stops it.
+
+If an agent stops listening, the standard MCP prompt `watch_studio` (or saying
+"Watch the Strōq Studio: handle every comment and Ask as it comes in, and keep
+waiting for the next one.") starts the loop again.
 
 `import_model_file` is the one tool the relay handles itself: it reads a model
 from this computer (`path`, absolute; optional `name`, `category`, `tags`) and
