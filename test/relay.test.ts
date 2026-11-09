@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CHUNK_BYTES } from '../src/modelFile.js';
 import { IMPORT_FILE, IMPORT_PART, macText, parseTabMessage, PROTOCOL, proofText, tokenKey } from '../src/protocol.js';
+import { waitForComments } from '../src/mcp.js';
 import { hmac, newToken, Relay } from '../src/relay.js';
 
 let port = 39100 + Math.floor(Math.random() * 500);
@@ -18,7 +19,7 @@ afterEach(async () => {
   for (const r of relays.splice(0)) await r.stop();
 });
 
-async function startRelay(opts: { onToolsChanged?: () => void } = {}) {
+async function startRelay(opts: { onToolsChanged?: () => void; graceMs?: number } = {}) {
   const r = new Relay({ port: ++port, ...opts });
   relays.push(r);
   await r.start();
@@ -382,16 +383,98 @@ describe('sealed frames', () => {
     expect(await t.closed).toBe(4004);
   });
 
-  it('answers pending calls with an error when the tab goes', async () => {
+  it('answers pending calls with an error when the tab switches off', async () => {
     let changed = 0;
     const r = await startRelay({ onToolsChanged: () => changed++ });
     const t = await paired(r);
     const p = r.call('list_routes', {});
     await t.next('call');
-    t.ws.close();
+    t.ws.close(1000);
     expect((await p).isError).toBe(true);
     expect(r.tools).toEqual([]);
     expect(changed).toBe(2);
+  });
+
+  it('a reload (the tab drops and resumes): keeps the tools, sends no list_changed, a call made meanwhile waits for it', async () => {
+    let changed = 0;
+    const r = await startRelay({ onToolsChanged: () => changed++ });
+    const t = tab(r);
+    const { resume } = await t.pair(tokenKey(r.pairingToken));
+    await t.next('welcome');
+    t.seal({ type: 'tools', tools: TOOLS });
+    await Bun.sleep(30);
+    const pending = r.call('list_routes', {});
+    await t.next('call');
+    t.ws.terminate(); // like a reload: no close frame
+    const first = await pending;
+    expect(first).toMatchObject({ isError: true, dropped: true });
+    expect(r.tools.map((x) => x.name)).toEqual(['list_routes']);
+    expect(r.status().state).toBe('reconnecting');
+    const meanwhile = r.call('list_routes', {});
+    await Bun.sleep(50);
+    const t2 = tab(r);
+    await t2.pair(resume, 'resume');
+    await t2.next('welcome');
+    t2.seal({ type: 'tools', tools: TOOLS });
+    const c = await t2.next('call');
+    t2.seal({ type: 'result', id: c.id, content: [{ type: 'text', text: '[]' }] });
+    expect(await meanwhile).toEqual({ content: [{ type: 'text', text: '[]' }], isError: false });
+    expect(changed).toBe(1);
+    expect(r.status().state).toBe('connected');
+  });
+
+  it('a tab that does not come back within the grace period: tools go, calls fail clearly', async () => {
+    let changed = 0;
+    const r = await startRelay({ onToolsChanged: () => changed++, graceMs: 150 });
+    const t = await paired(r);
+    t.ws.terminate();
+    await Bun.sleep(30);
+    const res = await r.call('list_routes', {});
+    expect(res.isError).toBe(true);
+    expect((res.content[0] as { text: string }).text).toContain('did not come back');
+    expect(r.tools).toEqual([]);
+    expect(r.status().state).toBe('waiting');
+    expect(changed).toBe(2);
+  });
+
+  it('wait_for_comments: a reload mid-wait is no error, the wait carries on in the tab that resumes', async () => {
+    const WAIT = [{ name: 'wait_for_comments', inputSchema: { type: 'object' as const } }];
+    const r = await startRelay();
+    const t = tab(r);
+    const { resume } = await t.pair(tokenKey(r.pairingToken));
+    await t.next('welcome');
+    t.seal({ type: 'tools', tools: WAIT });
+    await Bun.sleep(30);
+    const wait = waitForComments(r, { timeoutSec: 5 });
+    await t.next('call');
+    t.ws.terminate();
+    await Bun.sleep(100);
+    const t2 = tab(r);
+    await t2.pair(resume, 'resume');
+    await t2.next('welcome');
+    t2.seal({ type: 'tools', tools: WAIT });
+    const c = (await t2.next('call')) as { id: number; name: string; arguments: { timeoutSec: number } };
+    expect(c.name).toBe('wait_for_comments');
+    expect(c.arguments.timeoutSec).toBeLessThanOrEqual(5);
+    t2.seal({ type: 'result', id: c.id, content: [{ type: 'text', text: JSON.stringify({ waiting: [{ id: 'c1' }] }) }] });
+    const res = await wait;
+    expect(res).not.toHaveProperty('isError', true);
+    expect(JSON.parse((res.content[0] as { text: string }).text).waiting).toEqual([{ id: 'c1' }]);
+  });
+
+  it('wait_for_comments: a tab that does not come back gives a normal "call again", never an error', async () => {
+    const r = await startRelay({ graceMs: 200 });
+    const t = tab(r);
+    await t.pair(tokenKey(r.pairingToken));
+    await t.next('welcome');
+    t.seal({ type: 'tools', tools: [{ name: 'wait_for_comments', inputSchema: { type: 'object' } }] });
+    await Bun.sleep(30);
+    const wait = waitForComments(r, { timeoutSec: 5 });
+    await t.next('call');
+    t.ws.terminate();
+    const res = await wait;
+    expect(res).not.toHaveProperty('isError', true);
+    expect((res.content[0] as { text: string }).text).toContain('call wait_for_comments again');
   });
 
   it('says how to connect when no tab is there', async () => {
