@@ -8,8 +8,10 @@ import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprot
 import { MAX_MODEL_BYTES } from './modelFile.js';
 import { IMPORT_FILE, IMPORT_PART } from './protocol.js';
 import type { Relay } from './relay.js';
+import { createRequire } from 'node:module';
 
-export const VERSION = '0.1.0';
+/** From package.json (one folder up from src/ and dist/), so it never drifts from the published version. */
+export const VERSION: string = (createRequire(import.meta.url)('../package.json') as { version: string }).version;
 
 export const CONNECTION_TOOL = {
   name: 'studio_connection',
