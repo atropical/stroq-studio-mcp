@@ -114,14 +114,17 @@ If an agent stops listening, the standard MCP prompt `watch_studio` (or saying
 waiting for the next one.") starts the loop again.
 
 `import_model_file` is the one tool the relay handles itself: it reads a model
-from this computer (`path`, absolute; optional `lowPolyPath`, `name`,
-`category`, `tags`) and sends it to the tab in 1 MB parts over the sealed connection; the tab imports
+from this computer (`highPath` or `path`, absolute; optional `farPath`,
+`lowPolyStylePath` (old name `lowPolyPath`), `bake`, `name`, `category`, `tags`) and sends it to the tab in 1 MB parts over the sealed connection; the tab imports
 it into the Library the same way as the Library's own file import (optimised,
 scaled, thumbnail) and answers with the new asset id and its thumbnail. It is
-listed only while a connected tab offers it. `lowPolyPath` is the model's
-low-poly version (the fallback on weaker GPUs), checked and sent the same way;
-without one the Studio makes one itself, as the Workbench's "Make low-poly"
-does, and the result says so.
+listed only while a connected tab offers it. Every Studio model has four
+levels: High (the model), Far (a thinned copy, `farPath`), Baked (the Studio
+bakes it unless `bake` is false) and Low-poly style (`lowPolyStylePath`:
+flat-coloured, about 0.3–2k triangles, no textures; the fallback on weaker
+GPUs), each checked and sent the same way. What is not sent the Studio makes
+itself and marks for the person to approve; the result lists each level and
+what to ask.
 
 ## Using it with Blender MCP
 
@@ -138,10 +141,11 @@ ask, for example: "Model a small stone well in Blender, export it as GLB to
 /tmp/well.glb and add it to the Studio Library as a building." The agent
 models it through Blender MCP, exports with
 `bpy.ops.export_scene.gltf(filepath='/tmp/well.glb', export_format='GLB')`,
-also makes a low-poly version (flat-coloured, about 1–2k triangles, e.g. a
-Decimate modifier on a copy, exported to `/tmp/well_low.glb`) and calls
-`import_model_file` with both paths (`path` and `lowPolyPath`). Agents are told
-to always send one for a model they create, and never to show you the
+also makes a far level (a Decimate modifier on a copy, same materials, to
+`/tmp/well_far.glb`) and a low-poly style version (flat-coloured, about
+0.3–2k triangles, no textures, to `/tmp/well_low.glb`) and calls
+`import_model_file` with `highPath`, `farPath` and `lowPolyStylePath`. Agents
+are told to send all the levels they can for a model they create, and never to show you the
 temporary file paths. Model in metres, Z up (the glTF
 exporter turns it Y up); the Studio scales it to a real height by category.
 

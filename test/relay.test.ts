@@ -352,6 +352,21 @@ describe('sealed frames', () => {
       writeFileSync(join(dir, 'fake.glb'), 'nope');
       const bad = await r.importModelFile({ path: join(dir, 'tower_low.glb'), lowPolyPath: join(dir, 'fake.glb') });
       expect(bad).toMatchObject({ isError: true, content: [{ text: expect.stringContaining('Low-poly version') }] });
+
+      // highPath, lowPolyStylePath and farPath: each its own upload, in that order; bake passes through.
+      const all = r.importModelFile({ highPath: join(dir, 'tower_low.glb'), lowPolyStylePath: join(dir, 'tower_low.glb'), farPath: join(dir, 'tower_low.glb'), bake: false });
+      const uploads: string[] = [];
+      for (let i = 0; i < 3; i++) {
+        const c = (await t.next('call')) as { id: number; name: string; arguments: { upload: string } };
+        expect(c.name).toBe(IMPORT_PART);
+        uploads.push(c.arguments.upload);
+        t.seal({ type: 'result', id: c.id, content: [{ type: 'text', text: 'ok' }] });
+      }
+      const f3 = (await t.next('call')) as { id: number; arguments: Record<string, unknown> };
+      expect(f3.arguments).toMatchObject({ upload: uploads[0], lowPolyUpload: uploads[1], farUpload: uploads[2], farFiles: [{ name: 'tower_low.glb', size: low.length }], bake: false });
+      t.seal({ type: 'result', id: f3.id, content: [{ type: 'text', text: '{}' }] });
+      expect((await all).isError).toBe(false);
+      expect((await r.importModelFile({ farPath: join(dir, 'tower_low.glb') })).isError).toBe(true);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

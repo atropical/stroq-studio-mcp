@@ -257,16 +257,28 @@ export class Relay {
     if (!this.canImport) return err('This Studio tab cannot import model files: reload it, or update the Studio');
     let files: Awaited<ReturnType<typeof readModelFiles>>;
     let lowPoly: typeof files | null = null;
+    let far: typeof files | null = null;
+    const high = args.highPath ?? args.path;
+    if (high === undefined) return err('Give highPath (or path): the absolute path of the model');
     try {
-      files = await readModelFiles(args.path as string);
+      files = await readModelFiles(high as string);
     } catch (e) {
       return err(e instanceof ModelFileError ? e.message : `Could not read the model: ${(e as Error).message}`);
     }
-    if (args.lowPolyPath !== undefined) {
+    // lowPolyPath is the old name of lowPolyStylePath.
+    const stylePath = args.lowPolyStylePath ?? args.lowPolyPath;
+    if (stylePath !== undefined) {
       try {
-        lowPoly = await readModelFiles(args.lowPolyPath as string);
+        lowPoly = await readModelFiles(stylePath as string);
       } catch (e) {
         return err(`Low-poly version: ${e instanceof ModelFileError ? e.message : `could not read it: ${(e as Error).message}`}`);
+      }
+    }
+    if (args.farPath !== undefined) {
+      try {
+        far = await readModelFiles(args.farPath as string);
+      } catch (e) {
+        return err(`Far level: ${e instanceof ModelFileError ? e.message : `could not read it: ${(e as Error).message}`}`);
       }
     }
     const send = async (fs: typeof files) => {
@@ -290,8 +302,14 @@ export class Relay {
       if (typeof lowUpload !== 'string') return lowUpload;
       low = { lowPolyUpload: lowUpload, lowPolyFiles: list(lowPoly) };
     }
+    let farArgs = {};
+    if (far) {
+      const farUpload = await send(far);
+      if (typeof farUpload !== 'string') return farUpload;
+      farArgs = { farUpload, farFiles: list(far) };
+    }
     const pick = (k: string) => (args[k] === undefined ? {} : { [k]: args[k] });
-    return this.call(IMPORT_FILE, { upload, files: list(files), ...low, ...pick('name'), ...pick('category'), ...pick('tags') });
+    return this.call(IMPORT_FILE, { upload, files: list(files), ...low, ...farArgs, ...pick('name'), ...pick('category'), ...pick('tags'), ...pick('bake') });
   }
 
   private allowed(origin: string, req: IncomingMessage): boolean {
