@@ -23,17 +23,21 @@ export const CONNECTION_TOOL = {
 /** Handled here, not passed through: the relay reads the file and sends it to the tab in parts. */
 export const IMPORT_TOOL = {
   name: IMPORT_FILE,
-  description: `Adds a model file from this computer to the Studio Library (optimised, scaled, with a thumbnail). For a model made in Blender: export it as GLB (File → Export → glTF 2.0, format glb) to an absolute path, then call this. Takes .glb, .gltf (its buffers and textures from the same folder) or .zip, up to ${MAX_MODEL_BYTES / 1048576} MB; no symlinks. When you create a model, always make and send a low-poly version too (lowPolyPath): a flat-coloured, ~1–2k triangle version of the same object, the fallback on weaker GPUs; without one the Studio makes one automatically. Never show the person temporary file paths. Returns the new asset id and both thumbnails.`,
+  description: `Adds a model file from this computer to the Studio Library (optimised, scaled, with a thumbnail). For a model made in Blender: export it as GLB (File → Export → glTF 2.0, format glb) to an absolute path, then call this. Takes .glb, .gltf (its buffers and textures from the same folder) or .zip, up to ${MAX_MODEL_BYTES / 1048576} MB; no symlinks. Every Studio model has four levels: High (the model, near), Far (a thinned copy with the same look, middle distance), Baked (pictures around it, furthest; the Studio bakes it unless bake is false) and Low-poly style (flat colours, faceted, about 0.3–2k triangles, no textures; View › Low poly and weak GPUs). When you create a model, send all you can: highPath (or path), farPath and lowPolyStylePath (lowPolyPath is its old name). What you do not send the Studio makes itself and marks for approval: tell the person which levels were made automatically and ask them to check them in the Workbench (Levels) or to supply better ones. Never show the person temporary file paths. Returns the new asset id, each level's state and the thumbnails.`,
   inputSchema: {
     type: 'object' as const,
     properties: {
-      path: { type: 'string', description: 'Absolute path of the .glb, .gltf or .zip' },
-      lowPolyPath: { type: 'string', description: 'Absolute path of the low-poly version (.glb, .gltf or .zip; same checks and size cap). Always send one for a model you created' },
+      path: { type: 'string', description: 'Absolute path of the .glb, .gltf or .zip (the High level; same as highPath)' },
+      highPath: { type: 'string', description: 'Absolute path of the High level (the full model); path is the same' },
+      farPath: { type: 'string', description: 'Absolute path of the Far level: a thinned copy of the same model, same textures (about an eighth of the triangles)' },
+      lowPolyStylePath: { type: 'string', description: 'Absolute path of the Low-poly style version: flat-coloured, faceted, ~0.3–2k triangles, no textures. Always send one for a model you created' },
+      lowPolyPath: { type: 'string', description: 'Old name of lowPolyStylePath' },
+      bake: { type: 'boolean', description: 'Bake the Baked level in the Studio after the import (default true)' },
       name: { type: 'string', description: 'Name in the Library (default: from the file name)' },
       category: { type: 'string', enum: ['prop', 'plant', 'rock', 'tree', 'building', 'vehicle', 'character'], description: 'Library category (default prop)' },
       tags: { type: 'array', items: { type: 'string' }, description: 'Search tags' },
     },
-    required: ['path'],
+    required: [],
   },
 };
 
@@ -51,7 +55,8 @@ export const WAIT_TOOL = {
   inputSchema: { type: 'object' as const, properties: { timeoutSec: { type: 'integer', minimum: 1, maximum: WAIT_MAX_S, description: `Seconds to wait (default and max ${WAIT_MAX_S})` } } },
 };
 
-export const MODEL_RULE = 'When you create a model for the Studio, always make and send a low-poly version too (import_model_file lowPolyPath: a flat-coloured, ~1–2k triangle version of the same object), and never show the person temporary file paths.';
+export const MODEL_RULE =
+  'Every Studio model has four levels: High, Far (a thinned copy), Baked and Low-poly style (flat-coloured, ~0.3–2k triangles, no textures). When you create a model for the Studio, make and send all you can (import_model_file highPath, farPath, lowPolyStylePath; the Studio bakes the Baked level), tell the person which levels the Studio made automatically and ask them to approve or supply them, and never show the person temporary file paths.';
 
 export const WATCH_PROMPT = {
   name: 'watch_studio',
